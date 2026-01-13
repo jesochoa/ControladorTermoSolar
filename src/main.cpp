@@ -23,33 +23,26 @@ SH1106 *oled_display = nullptr; // Instancia global del display
 
 // Instancia del encoder
 Encoder *rotary_encoder = nullptr;
+Encoder *manual_enconder = nullptr;
 
 bool init_i2c();                          // Configura I2C
 bool init_gpio();                         // Configura GPIO
 void pantalla();                          // Funcion imprime en pantalla
 void estado_botones(bool *confirm_state); // Funcion lee estado botones
-void update_encoder_display();            // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN PANTALLA
+void update_encoder_display_auto();            // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO AUTOMATICO
+void update_encoder_display_manual();          // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO MANUAL
 void verificar_pantalla_128x64();         // Función de diagnóstico de pantalla 128x64
 
-/***********************************/
-/*      FUNCIÓN PRINCIPAL          */
-/***********************************/
+/************************************/
+/*                                  */
+/*      FUNCIÓN PRINCIPAL           */
+/*                                  */
+/************************************/
 extern "C" void app_main()
 {
-    // Verificar stack disponible
-    ESP_LOGI(TAG, "Stack libre inicial: %u bytes", uxTaskGetStackHighWaterMark(NULL));
-
-    if (!init_i2c())
-    { // Inicializar I2C
-        ESP_LOGE(TAG, "Fallo la inicializacion I2C. Abortando...");
-        return; // Salir si falla I2C
-    }
-
-    if (!init_gpio())
-    { // Inicializar GPIO
-        ESP_LOGE(TAG, "Fallo la inicializacion GPIO. Abortando...");
-        return; // Salir si falla GPIO
-    }
+    // Inicializaciones
+    init_i2c();  // Inicializar I2C
+    init_gpio(); // Inicializar GPIO
 
     // Crear instancia del display pasando el handle del dispositivo I2C
     oled_display = new SH1106(sh1106_dev_handle);
@@ -79,30 +72,55 @@ extern "C" void app_main()
         ESP_LOGE(TAG, "Fallo la inicializacion del encoder");
         return;
     }
-    ESP_LOGI(TAG, "Encoder inicializado correctamente");
+    else
+    {
+        ESP_LOGI(TAG, "Encoder inicializado correctamente");
+    }
+
+    manual_enconder = new Encoder(ENCODER_PIN_A, ENCODER_PIN_B, 0, 1500, 100, 10, 150);
+    if (!manual_enconder->init())
+    {
+        ESP_LOGE(TAG, "Fallo la inicializacion del encoder");
+        return;
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Encoder inicializado correctamente");
+    }
 
     pantalla(); // Mostrar pantalla inicial
 
-    ESP_LOGI(TAG, "Stack libre despues de inicializacion: %u bytes", uxTaskGetStackHighWaterMark(NULL));
-
-    bool confirm_state = 0;
+    bool mode = true; // Modo inicial del sistema: AUTOMATICO
+    int enconder_auto_last = rotary_encoder->get_count(); // Valor inicial del encoder en modo automático
+    int enconder_manual_last = manual_enconder->get_count(); // Valor inicial del encoder en modo manual
+    update_encoder_display_auto();
 
     while (1)
     {
-        /// Actualizar encoder
-        rotary_encoder->update();
-
-        // Actualizar display del encoder si hay cambios
-        static int last_display_count = -1;
-        int current_count = rotary_encoder->get_count();
-        if (current_count != last_display_count)
-        {
-            update_encoder_display();
-            last_display_count = current_count;
-        }
-
         // Leer botones BACK y CONFIRM
-        estado_botones(&confirm_state);
+        estado_botones(&mode);
+
+        if (mode)
+        {   // Modo AUTOMATICO    
+            rotary_encoder->update();
+            // Actualizar display del encoder si hay cambios
+            if (rotary_encoder->get_count() != enconder_auto_last)
+            {
+                update_encoder_display_auto();
+                enconder_auto_last = rotary_encoder->get_count();
+            }
+        }
+        else
+        {
+            // Modo MANUAL
+            manual_enconder->update();
+            // Actualizar display del encoder si hay cambios
+            if (manual_enconder->get_count() != enconder_manual_last)
+            {
+                update_encoder_display_manual();
+                enconder_manual_last = manual_enconder->get_count();
+            }
+        }
     }
 }
 
@@ -118,7 +136,7 @@ void pantalla()
         oled_display->drawString(2, 2, " ");
         oled_display->drawString(2, 3, "Termo (W):");
         oled_display->drawString(2, 4, "  ");
-        oled_display->drawString(2, 5, "Casa  (W):");
+        oled_display->drawString(2, 5, "Casa  (W):        ");
         oled_display->drawString(2, 6, " ");
         oled_display->drawString(2, 7, "Modo: AUTOMATICO");
         oled_display->update();
@@ -127,46 +145,30 @@ void pantalla()
 
 void estado_botones(bool *confirm_state)
 {
-    // Botones BACK y CONFIRM
-    bool back_state = 0;
-    // bool confirm_state = confirm_state_1;
-
-    if (gpio_get_level(GPIO_NUM_5) == 0)
-    {
-        back_state = !back_state;
-        if (back_state == 1)
-        {
-            oled_display->drawString(2, 3, "BACK ENCENDIDO");
-            printf("BACK ENCENDIDO \n");
-        }
-        else
-        {
-            oled_display->drawString(2, 3, "BACK APAGADO");
-            printf("BACK APAGADO \n");
-        }
-        oled_display->update();
-        vTaskDelay(pdMS_TO_TICKS(200)); // Anti-rebote
-    }
-
+    // Leer botón CONFIRM (GPIO6)
     if (gpio_get_level(GPIO_NUM_6) == 0)
     {
         *confirm_state = !*confirm_state;
 
         if (*confirm_state == 1)
         {
-            oled_display->drawString(2, 7, "Modo: AUTOMATICO");
+            oled_display->drawString(70, 3, "     ");
             oled_display->drawString(2, 5, "Casa  (W):");
-            update_encoder_display();
+            oled_display->drawString(2, 7, "Modo: AUTOMATICO");
+            oled_display->update();
+            update_encoder_display_auto();
         }
         else
         {
+            oled_display->drawString(70, 5, "     ");
             oled_display->drawString(2, 7, "Modo: MANUAL     ");
-            oled_display->drawString(2, 5, "                      ");
+            oled_display->update();
+            update_encoder_display_manual();
         }
-        oled_display->update();
+        
         vTaskDelay(pdMS_TO_TICKS(200)); // Anti-rebote con 100 suele fallar
     }
-    vTaskDelay(pdMS_TO_TICKS(10));
+    
 }
 
 // 🔹 FUNCIÓN PARA INICIALIZAR I2C
@@ -242,16 +244,28 @@ bool init_gpio()
     return true;
 }
 
-// 🔹 FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN PANTALLA
-void update_encoder_display()
+// 🔹 FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN PANTALLA EN MODO AUTOMATICO
+void update_encoder_display_auto()
 {
     if (oled_display && rotary_encoder)
     {
         char buffer[16];
         snprintf(buffer, sizeof(buffer), "%d", rotary_encoder->get_count());
-
-        oled_display->drawString(70, 5, "    "); // Limpiar área
+        oled_display->drawString(70, 5, "     "); // Limpiar área anterior
         oled_display->drawString(70, 5, buffer);
+        oled_display->update();
+    }
+}
+
+// 🔹 FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN PANTALLA EN MODO MANUAL
+void update_encoder_display_manual()
+{
+    if (oled_display && manual_enconder)
+    {
+        char buffer[16];
+        snprintf(buffer, sizeof(buffer), "%d", manual_enconder->get_count());
+        oled_display->drawString(70, 3, "     "); // Limpiar área anterior
+        oled_display->drawString(70, 3, buffer);
         oled_display->update();
     }
 }
