@@ -29,8 +29,8 @@ bool init_i2c();                          // Configura I2C
 bool init_gpio();                         // Configura GPIO
 void pantalla();                          // Funcion imprime en pantalla
 void estado_botones(bool *confirm_state); // Funcion lee estado botones
-void update_encoder_display_auto();            // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO AUTOMATICO
-void update_encoder_display_manual();          // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO MANUAL
+void update_encoder_display_auto();       // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO AUTOMATICO
+void update_encoder_display_manual();     // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO MANUAL
 void verificar_pantalla_128x64();         // Función de diagnóstico de pantalla 128x64
 
 /************************************/
@@ -90,8 +90,8 @@ extern "C" void app_main()
 
     pantalla(); // Mostrar pantalla inicial
 
-    bool mode = true; // Modo inicial del sistema: AUTOMATICO
-    int enconder_auto_last = rotary_encoder->get_count(); // Valor inicial del encoder en modo automático
+    bool mode = true;                                        // Modo inicial del sistema: AUTOMATICO
+    int enconder_auto_last = rotary_encoder->get_count();    // Valor inicial del encoder en modo automático
     int enconder_manual_last = manual_enconder->get_count(); // Valor inicial del encoder en modo manual
     update_encoder_display_auto();
 
@@ -101,7 +101,7 @@ extern "C" void app_main()
         estado_botones(&mode);
 
         if (mode)
-        {   // Modo AUTOMATICO    
+        { // Modo AUTOMATICO
             rotary_encoder->update();
             // Actualizar display del encoder si hay cambios
             if (rotary_encoder->get_count() != enconder_auto_last)
@@ -145,7 +145,7 @@ void pantalla()
 
 void estado_botones(bool *confirm_state)
 {
-    // Leer botón CONFIRM (GPIO6)
+    // pulsado botón CONFIRM (GPIO6)
     if (gpio_get_level(GPIO_NUM_6) == 0)
     {
         *confirm_state = !*confirm_state;
@@ -165,10 +165,22 @@ void estado_botones(bool *confirm_state)
             oled_display->update();
             update_encoder_display_manual();
         }
-        
-        vTaskDelay(pdMS_TO_TICKS(200)); // Anti-rebote con 100 suele fallar
+        // Pequeña demora para evitar rebotes
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
-    
+
+    // Pulsado botón BACK (GPIO5)
+    if (gpio_get_level(GPIO_NUM_5) == 0)
+    {
+        if (!*confirm_state)
+        {
+            manual_enconder->set_count(0);
+        }
+        else
+        {
+            rotary_encoder->set_count(0);
+        }
+    }
 }
 
 // 🔹 FUNCIÓN PARA INICIALIZAR I2C
@@ -244,12 +256,12 @@ bool init_gpio()
     return true;
 }
 
-// 🔹 FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN PANTALLA EN MODO AUTOMATICO
+//  FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN PANTALLA EN MODO AUTOMATICO
 void update_encoder_display_auto()
 {
     if (oled_display && rotary_encoder)
     {
-        char buffer[16];
+        char buffer[5];
         snprintf(buffer, sizeof(buffer), "%d", rotary_encoder->get_count());
         oled_display->drawString(70, 5, "     "); // Limpiar área anterior
         oled_display->drawString(70, 5, buffer);
@@ -257,13 +269,14 @@ void update_encoder_display_auto()
     }
 }
 
-// 🔹 FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN PANTALLA EN MODO MANUAL
+//  FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN PANTALLA EN MODO MANUAL
 void update_encoder_display_manual()
 {
     if (oled_display && manual_enconder)
     {
-        char buffer[16];
-        snprintf(buffer, sizeof(buffer), "%d", manual_enconder->get_count());
+        char buffer[5];
+        // itaa utiliza menos memoria que snprintf()
+        itoa(manual_enconder->get_count(), buffer, 10);
         oled_display->drawString(70, 3, "     "); // Limpiar área anterior
         oled_display->drawString(70, 3, buffer);
         oled_display->update();
