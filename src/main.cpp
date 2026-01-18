@@ -27,6 +27,7 @@ Encoder *manual_enconder = nullptr;
 
 bool init_i2c();                          // Configura I2C
 bool init_gpio();                         // Configura GPIO
+bool init_interrupts();                   // Configura interrupciones GPIO
 void pantalla();                          // Funcion imprime en pantalla
 void estado_botones(bool *confirm_state); // Funcion lee estado botones
 void update_encoder_display_auto();       // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO AUTOMATICO
@@ -41,8 +42,9 @@ void verificar_pantalla_128x64();         // Función de diagnóstico de pantall
 extern "C" void app_main()
 {
     // Inicializaciones
-    init_i2c();  // Inicializar I2C
-    init_gpio(); // Inicializar GPIO
+    init_i2c();        // Inicializar I2C
+    init_gpio();       // Inicializar GPIO
+    init_interrupts(); // Inicializar interrupciones GPIO_0 paso por cero
 
     // Crear instancia del display pasando el handle del dispositivo I2C
     oled_display = new SH1106(sh1106_dev_handle);
@@ -121,6 +123,7 @@ extern "C" void app_main()
                 enconder_manual_last = manual_enconder->get_count();
             }
         }
+        vTaskDelay(1); // Pequeña demora para evitar uso excesivo de CPU
     }
 }
 
@@ -130,7 +133,7 @@ void pantalla()
     if (oled_display)
     {
         oled_display->clear();
-        // 🔹 AJUSTADO: Solo 8 líneas disponibles (0-7)
+        //   AJUSTADO: Solo 8 líneas disponibles (0-7)
         oled_display->drawString(2, 0, "  Placa Solar:");
         oled_display->drawString(2, 1, "Voltaje Placa:");
         oled_display->drawString(2, 2, " ");
@@ -183,7 +186,7 @@ void estado_botones(bool *confirm_state)
     }
 }
 
-// 🔹 FUNCIÓN PARA INICIALIZAR I2C
+// FUNCIÓN PARA INICIALIZAR I2C
 bool init_i2c()
 {
     ESP_LOGI(TAG, "Inicializando I2C...");
@@ -245,6 +248,45 @@ bool init_gpio()
         .intr_type = GPIO_INTR_DISABLE,
     };
     ret = gpio_config(&io_conf);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Error configurando GPIO: %s", esp_err_to_name(ret));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "IO inicializado correctamente");
+    vTaskDelay(pdMS_TO_TICKS(100)); // Pequeña pausa
+    return true;
+}
+
+// Esta es la función que se ejecutará (ISR Handler) para paso por cero
+void IRAM_ATTR isr_paso_cero(void *arg)
+{
+    // Aquí puedes manejar el evento de paso por cero
+}
+
+// Funcion para incializar el GPIO con interrupciones
+bool init_interrupts()
+{
+    ESP_LOGI(TAG, "Inicializando interrupciones GPIO ...");
+    esp_err_t ret;
+
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << GPIO_NUM_1), // Pin GPIO1 para interrupciones
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .intr_type = GPIO_INTR_POSEDGE, // Interrupción en flanco de subida
+    };
+
+    ret = gpio_config(&io_conf);
+
+    // Instalar el servicio de manejo de interrupciones GPIO_1
+    gpio_install_isr_service(0);
+
+    // Asociar la función de manejo de interrupciones al pin GPIO_1
+    gpio_isr_handler_add(GPIO_NUM_1, isr_paso_cero, (void *)GPIO_NUM_1);
+
     if (ret != ESP_OK)
     {
         ESP_LOGE(TAG, "Error configurando GPIO: %s", esp_err_to_name(ret));
