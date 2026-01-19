@@ -4,6 +4,7 @@
 #include "driver/gpio.h"
 #include "sh1106.h"
 #include "encoder.h"
+#include "esp_timer.h"
 
 #define TAG "OLED_APP"
 
@@ -17,6 +18,14 @@
 #define I2C_MASTER_FREQ_HZ 100000 // estaba 400kHz lo pongo para trastear con el osciloscopio
 #define SH1106_I2C_ADDRESS 0x3C
 
+#include "rom/ets_sys.h" // Para ets_delay_us
+// Duración del pulso en ALTO (fijo)
+#define ANCHO_PULSO_US 530
+// Variable global para el tiempo de espera antes del disparo (0 a 10.000 us)
+// "volatile" es vital para que el compilador sepa que esto cambia en tiempo real
+volatile uint64_t tiempo_espera_us = 0;
+esp_timer_handle_t timer_handle; // Handle del timer para el retardo
+
 i2c_master_bus_handle_t bus_handle = nullptr;
 i2c_master_dev_handle_t sh1106_dev_handle = nullptr;
 SH1106 *oled_display = nullptr; // Instancia global del display
@@ -28,11 +37,13 @@ Encoder *manual_enconder = nullptr;
 bool init_i2c();                          // Configura I2C
 bool init_gpio();                         // Configura GPIO
 bool init_interrupts();                   // Configura interrupciones GPIO
+void IRAM_ATTR isr_paso_cero(void *arg);  // Manejador de interrupciones paso por cero
 void pantalla();                          // Funcion imprime en pantalla
 void estado_botones(bool *confirm_state); // Funcion lee estado botones
 void update_encoder_display_auto();       // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO AUTOMATICO
 void update_encoder_display_manual();     // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO MANUAL
 void verificar_pantalla_128x64();         // Función de diagnóstico de pantalla 128x64
+void timer_callback(void *arg);           // Callback del timer de retardo
 
 /************************************/
 /*                                  */
@@ -41,10 +52,30 @@ void verificar_pantalla_128x64();         // Función de diagnóstico de pantall
 /************************************/
 extern "C" void app_main()
 {
+    // Variable para el modo (automático/manual)
+    bool mode = true;         // true = automático, false = manual
+    int enconder_auto_last;   // Valor del Encoder en modo automático
+    int enconder_manual_last; // Valor del encoder en modo manual
+
     // Inicializaciones
     init_i2c();        // Inicializar I2C
     init_gpio();       // Inicializar GPIO
     init_interrupts(); // Inicializar interrupciones GPIO_0 paso por cero
+
+    // Instalar el servicio de manejo de interrupciones GPIO_1
+    gpio_install_isr_service(0);
+
+    // Asociar la función de manejo de interrupciones al pin GPIO_1
+    gpio_isr_handler_add(GPIO_NUM_1, isr_paso_cero, &mode);
+
+    // Crear el Timer de Alta Resolución
+    const esp_timer_create_args_t timer_args = {
+        .callback = &timer_callback,       // Función callback del timer
+        .arg = nullptr,                    // No se pasan argumentos
+        .dispatch_method = ESP_TIMER_TASK, // Ejecutar en tarea de alta prioridad (más seguro para 530us)
+        .name = "disparador_pulso_retardo"};
+
+    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &timer_handle));
 
     // Crear instancia del display pasando el handle del dispositivo I2C
     oled_display = new SH1106(sh1106_dev_handle);
@@ -92,9 +123,8 @@ extern "C" void app_main()
 
     pantalla(); // Mostrar pantalla inicial
 
-    bool mode = true;                                        // Modo inicial del sistema: AUTOMATICO
-    int enconder_auto_last = rotary_encoder->get_count();    // Valor inicial del encoder en modo automático
-    int enconder_manual_last = manual_enconder->get_count(); // Valor inicial del encoder en modo manual
+    enconder_auto_last = rotary_encoder->get_count();    // Valor inicial del encoder en modo automático
+    enconder_manual_last = manual_enconder->get_count(); // Valor inicial del encoder en modo manual
     update_encoder_display_auto();
 
     while (1)
@@ -121,15 +151,37 @@ extern "C" void app_main()
             {
                 update_encoder_display_manual();
                 enconder_manual_last = manual_enconder->get_count();
+                tiempo_espera_us = 10000.0f - ((float) enconder_manual_last * 6.666667f);
+                //printf("Retardo manual ajustado a: %llu us\n", tiempo_espera_us);
             }
         }
         vTaskDelay(1); // Pequeña demora para evitar uso excesivo de CPU
     }
 }
 
+// Callback del Timer: Genera el pulso de 530us
+void timer_callback(void *arg)
+{
+    if (tiempo_espera_us == 0 || tiempo_espera_us > 9999)
+    {
+        // Si el tiempo de espera es 0, no hacemos nada
+        return;
+    }
+
+    // 1. Subir el pin (Inicio del pulso)
+    gpio_set_level(GPIO_NUM_2, 1);
+
+    // 2. Esperar exactamente 530 microsegundos
+    // Bloqueamos la CPU brevemente para garantizar precisión absoluta
+    ets_delay_us(ANCHO_PULSO_US);
+
+    // 3. Bajar el pin (Fin del pulso)
+    gpio_set_level(GPIO_NUM_2, 0);
+}
+
+// Función para actualizar la pantalla
 void pantalla()
 {
-    // Ejemplo de función para actualizar la pantalla
     if (oled_display)
     {
         oled_display->clear();
@@ -239,7 +291,7 @@ bool init_gpio()
     ESP_LOGI(TAG, "Inicializando GPIO ...");
     esp_err_t ret;
 
-    // Configurar GPIO
+    // Configurar GPIO  BACK y CONFIRM como entradas
     gpio_config_t io_conf = {
         .pin_bit_mask = ((1ULL << GPIO_NUM_5) | (1ULL << GPIO_NUM_6)), // Botones BACK y CONFIRM
         .mode = GPIO_MODE_INPUT,
@@ -250,22 +302,47 @@ bool init_gpio()
     ret = gpio_config(&io_conf);
     if (ret != ESP_OK)
     {
-        ESP_LOGE(TAG, "Error configurando GPIO: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Error configurando GPIO_5 Y GPIO_6: %s", esp_err_to_name(ret));
         return false;
     }
 
-    ESP_LOGI(TAG, "IO inicializado correctamente");
-    vTaskDelay(pdMS_TO_TICKS(100)); // Pequeña pausa
+    // Configurar GPIO_2 como salida para el modulo SRC
+    io_conf.pin_bit_mask = (1ULL << GPIO_NUM_2); // Pin GPIO2 para salida
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    ret = gpio_config(&io_conf);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Error configurando GPIO_2: %s", esp_err_to_name(ret));
+        return false;
+    }
+    gpio_set_level(GPIO_NUM_2, 0); // Inicialmente en bajo
+
+    ESP_LOGI(TAG, "GPIO inicializado correctamente");
     return true;
 }
 
 // Esta es la función que se ejecutará (ISR Handler) para paso por cero
 void IRAM_ATTR isr_paso_cero(void *arg)
 {
-    // Aquí puedes manejar el evento de paso por cero
+    // Paso de seguridad: Si ya había un timer corriendo (porque llegaron pulsos muy rápido),
+    // lo detenemos para reiniciar la cuenta. Esto hace el sistema "re-disparable".
+    esp_timer_stop(timer_handle);
+
+    if (tiempo_espera_us > 0)
+    {
+        // Si hay retardo, programamos el timer
+        esp_timer_start_once(timer_handle, tiempo_espera_us);
+    }
+    else
+    {
+        // CASO ESPECIAL: Si el tiempo es 0, no esperamos.
+        // Llamamos directamente al callback o lanzamos el timer con 0.
+        // Lanzarlo con 0 es más seguro para no bloquear esta ISR con los 530us del pulso.
+        esp_timer_start_once(timer_handle, 0);
+    }
 }
 
-// Funcion para incializar el GPIO con interrupciones
+// Funcion para incializar el GPIO con interrupcion
 bool init_interrupts()
 {
     ESP_LOGI(TAG, "Inicializando interrupciones GPIO ...");
@@ -276,16 +353,9 @@ bool init_interrupts()
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_ENABLE,
-        .intr_type = GPIO_INTR_POSEDGE, // Interrupción en flanco de subida
+        .intr_type = GPIO_INTR_ANYEDGE, // Interrupción en flanco de subida y bajada
     };
-
     ret = gpio_config(&io_conf);
-
-    // Instalar el servicio de manejo de interrupciones GPIO_1
-    gpio_install_isr_service(0);
-
-    // Asociar la función de manejo de interrupciones al pin GPIO_1
-    gpio_isr_handler_add(GPIO_NUM_1, isr_paso_cero, (void *)GPIO_NUM_1);
 
     if (ret != ESP_OK)
     {
@@ -294,7 +364,6 @@ bool init_interrupts()
     }
 
     ESP_LOGI(TAG, "IO inicializado correctamente");
-    vTaskDelay(pdMS_TO_TICKS(100)); // Pequeña pausa
     return true;
 }
 
