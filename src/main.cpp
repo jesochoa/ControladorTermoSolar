@@ -8,27 +8,28 @@
 
 #define TAG "OLED_APP"
 
-// Pines del encoder
-#define ENCODER_PIN_A GPIO_NUM_7
-#define ENCODER_PIN_B GPIO_NUM_10
+// Definiciones de pines
+#define ENCODER_PIN_A       GPIO_NUM_7
+#define ENCODER_PIN_B       GPIO_NUM_10
+#define PASO_CERO           GPIO_NUM_1
 
 // Configuración I2C
-#define I2C_MASTER_SCL_IO GPIO_NUM_9
-#define I2C_MASTER_SDA_IO GPIO_NUM_8
-#define I2C_MASTER_FREQ_HZ 100000 // estaba 400kHz lo pongo para trastear con el osciloscopio
-#define SH1106_I2C_ADDRESS 0x3C
+#define I2C_MASTER_SCL_IO   GPIO_NUM_9
+#define I2C_MASTER_SDA_IO   GPIO_NUM_8
+#define I2C_MASTER_FREQ_HZ  100000 
+#define SH1106_I2C_ADDRESS  0x3C
+i2c_master_bus_handle_t bus_handle = nullptr;
+i2c_master_dev_handle_t sh1106_dev_handle = nullptr;
+SH1106 *oled_display = nullptr; // Instancia global del display
 
-#include "rom/ets_sys.h" // Para ets_delay_us
-// Duración del pulso en ALTO (fijo)
-#define ANCHO_PULSO_US 530
+// Configuración Timer y retardo
+#include "rom/ets_sys.h"        // Para ets_delay_us
+#define ANCHO_PULSO_US 530      // Duración del pulso en ALTO (fijo)
 // Variable global para el tiempo de espera antes del disparo (0 a 10.000 us)
 // "volatile" es vital para que el compilador sepa que esto cambia en tiempo real
 volatile uint64_t tiempo_espera_us = 0;
 esp_timer_handle_t timer_handle; // Handle del timer para el retardo
 
-i2c_master_bus_handle_t bus_handle = nullptr;
-i2c_master_dev_handle_t sh1106_dev_handle = nullptr;
-SH1106 *oled_display = nullptr; // Instancia global del display
 
 // Instancia del encoder
 Encoder *rotary_encoder = nullptr;
@@ -36,47 +37,33 @@ Encoder *manual_enconder = nullptr;
 
 bool init_i2c();                          // Configura I2C
 bool init_gpio();                         // Configura GPIO
-bool init_interrupts();                   // Configura interrupciones GPIO
+bool init_interrupts(void *mode);         // Configura interrupciones GPIO
 void IRAM_ATTR isr_paso_cero(void *arg);  // Manejador de interrupciones paso por cero
 void pantalla();                          // Funcion imprime en pantalla
 void estado_botones(bool *confirm_state); // Funcion lee estado botones
 void update_encoder_display_auto();       // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO AUTOMATICO
 void update_encoder_display_manual();     // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO MANUAL
 void verificar_pantalla_128x64();         // Función de diagnóstico de pantalla 128x64
+void timer_init();                        // Inicializa el timer de alta resolución
 void timer_callback(void *arg);           // Callback del timer de retardo
 
-/************************************/
-/*                                  */
-/*      FUNCIÓN PRINCIPAL           */
-/*                                  */
-/************************************/
+/******************************************************************************************************/
+/*                                                                                                    */
+/*                        FUNCIÓN PRINCIPAL                                                                             */
+/*                                                                                                    */
+/******************************************************************************************************/
 extern "C" void app_main()
 {
-    // Variable para el modo (automático/manual)
-    bool mode = true;         // true = automático, false = manual
+    bool mode = true;         // Modo de funcionamiento true = automático, false = manual
     int enconder_auto_last;   // Valor del Encoder en modo automático
     int enconder_manual_last; // Valor del encoder en modo manual
 
     // Inicializaciones
-    init_i2c();        // Inicializar I2C
-    init_gpio();       // Inicializar GPIO
-    init_interrupts(); // Inicializar interrupciones GPIO_0 paso por cero
-
-    // Instalar el servicio de manejo de interrupciones GPIO_1
-    gpio_install_isr_service(0);
-
-    // Asociar la función de manejo de interrupciones al pin GPIO_1
-    gpio_isr_handler_add(GPIO_NUM_1, isr_paso_cero, &mode);
-
-    // Crear el Timer de Alta Resolución
-    const esp_timer_create_args_t timer_args = {
-        .callback = &timer_callback,       // Función callback del timer
-        .arg = nullptr,                    // No se pasan argumentos
-        .dispatch_method = ESP_TIMER_TASK, // Ejecutar en tarea de alta prioridad (más seguro para 530us)
-        .name = "disparador_pulso_retardo"};
-
-    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &timer_handle));
-
+    init_i2c();             // Inicializar I2C
+    init_gpio();            // Inicializar GPIO
+    init_interrupts(&mode); // Inicializar interrupciones GPIO_1 paso por cero
+    timer_init();           // Inicializar el Timer de alta resolución
+    
     // Crear instancia del display pasando el handle del dispositivo I2C
     oled_display = new SH1106(sh1106_dev_handle);
 
@@ -98,29 +85,13 @@ extern "C" void app_main()
         ESP_LOGE(TAG, "SH1106 no detectado");
     }
 
-    // Crear e inicializar el encoder
+    // Crear e inicializar el encoder automatico y manual
     rotary_encoder = new Encoder(ENCODER_PIN_A, ENCODER_PIN_B, -1000, 1000, 10, 1, 150);
-    if (!rotary_encoder->init())
-    {
-        ESP_LOGE(TAG, "Fallo la inicializacion del encoder");
-        return;
-    }
-    else
-    {
-        ESP_LOGI(TAG, "Encoder inicializado correctamente");
-    }
+    rotary_encoder->init();
 
     manual_enconder = new Encoder(ENCODER_PIN_A, ENCODER_PIN_B, 0, 1500, 100, 10, 150);
-    if (!manual_enconder->init())
-    {
-        ESP_LOGE(TAG, "Fallo la inicializacion del encoder");
-        return;
-    }
-    else
-    {
-        ESP_LOGI(TAG, "Encoder inicializado correctamente");
-    }
-
+    manual_enconder->init();
+    
     pantalla(); // Mostrar pantalla inicial
 
     enconder_auto_last = rotary_encoder->get_count();    // Valor inicial del encoder en modo automático
@@ -151,8 +122,8 @@ extern "C" void app_main()
             {
                 update_encoder_display_manual();
                 enconder_manual_last = manual_enconder->get_count();
-                tiempo_espera_us = 10000.0f - ((float) enconder_manual_last * 6.666667f);
-                //printf("Retardo manual ajustado a: %llu us\n", tiempo_espera_us);
+                tiempo_espera_us = 10000.0f - ((float)enconder_manual_last * 6.666667f);
+                // printf("Retardo manual ajustado a: %llu us\n", tiempo_espera_us);
             }
         }
         vTaskDelay(1); // Pequeña demora para evitar uso excesivo de CPU
@@ -164,19 +135,15 @@ void timer_callback(void *arg)
 {
     if (tiempo_espera_us == 0 || tiempo_espera_us > 9999)
     {
-        // Si el tiempo de espera es 0, no hacemos nada
-        return;
+        return; // Si el tiempo de espera es 0 o > 9999 no hacemos nada
     }
 
-    // 1. Subir el pin (Inicio del pulso)
-    gpio_set_level(GPIO_NUM_2, 1);
-
-    // 2. Esperar exactamente 530 microsegundos
-    // Bloqueamos la CPU brevemente para garantizar precisión absoluta
-    ets_delay_us(ANCHO_PULSO_US);
-
-    // 3. Bajar el pin (Fin del pulso)
-    gpio_set_level(GPIO_NUM_2, 0);
+    gpio_set_level(GPIO_NUM_2, 1);  // 1. Subir el pin (Inicio del pulso)
+    
+    // Bloqueamos la CPU 30 microsegundos para garantizar precisión absoluta
+    ets_delay_us(ANCHO_PULSO_US);   // 2. Esperar exactamente 30 micr5osegundos
+    
+    gpio_set_level(GPIO_NUM_2, 0);  // 3. Bajar el pin (Fin del pulso)
 }
 
 // Función para actualizar la pantalla
@@ -241,7 +208,6 @@ void estado_botones(bool *confirm_state)
 // FUNCIÓN PARA INICIALIZAR I2C
 bool init_i2c()
 {
-    ESP_LOGI(TAG, "Inicializando I2C...");
     esp_err_t ret;
 
     // 1. Configurar el bus I2C
@@ -285,7 +251,7 @@ bool init_i2c()
     return true;
 }
 
-// 🔹 FUNCIÓN PARA INICIALIZAR GPIO
+//  FUNCIÓN PARA INICIALIZAR GPIO
 bool init_gpio()
 {
     ESP_LOGI(TAG, "Inicializando GPIO ...");
@@ -321,6 +287,29 @@ bool init_gpio()
     return true;
 }
 
+// Inicializa el timer de alta resolución
+void timer_init()
+{
+    esp_err_t ret;
+
+    // Crear el Timer de Alta Resolución
+    const esp_timer_create_args_t timer_args = {
+        .callback = &timer_callback,       // Función callback del timer
+        .arg = nullptr,                    // No se pasan argumentos
+        .dispatch_method = ESP_TIMER_TASK, // Ejecutar en tarea de alta prioridad (más seguro para 530us)
+        .name = "disparador_pulso_retardo"};
+
+    ret = esp_timer_create(&timer_args, &timer_handle);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Error creando timer: %s", esp_err_to_name(ret));
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Timer de alta resolucion inicializado correctamente");
+    }
+}
+
 // Esta es la función que se ejecutará (ISR Handler) para paso por cero
 void IRAM_ATTR isr_paso_cero(void *arg)
 {
@@ -343,13 +332,13 @@ void IRAM_ATTR isr_paso_cero(void *arg)
 }
 
 // Funcion para incializar el GPIO con interrupcion
-bool init_interrupts()
+bool init_interrupts(void *mode)
 {
     ESP_LOGI(TAG, "Inicializando interrupciones GPIO ...");
     esp_err_t ret;
 
     gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << GPIO_NUM_1), // Pin GPIO1 para interrupciones
+        .pin_bit_mask = (1ULL << PASO_CERO), // Pin GPIO1 para interrupciones
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_ENABLE,
@@ -358,10 +347,15 @@ bool init_interrupts()
     ret = gpio_config(&io_conf);
 
     if (ret != ESP_OK)
-    {
-        ESP_LOGE(TAG, "Error configurando GPIO: %s", esp_err_to_name(ret));
+    {   ESP_LOGE(TAG, "Error configurando GPIO: %s", esp_err_to_name(ret));
         return false;
     }
+
+    // Instalar el servicio de manejo de interrupciones GPIO_1
+    gpio_install_isr_service(0);
+    // Asociar la función de manejo de interrupciones al pin GPIO_1
+    gpio_isr_handler_add(PASO_CERO, isr_paso_cero, &mode);
+
 
     ESP_LOGI(TAG, "IO inicializado correctamente");
     return true;
