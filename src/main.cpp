@@ -5,35 +5,36 @@
 #include "sh1106.h"
 #include "encoder.h"
 #include "esp_timer.h"
-#include "driver/uart.h" // Para comunicación Modbus RTU
+#include "driver/uart.h"   // Para comunicación Modbus RTU
+#include "freertos/task.h" // Para leer PZEM-004T periódicamente
 
 #define TAG "OLED_APP"
 
 // Configuración UART para Modbus RTU
 #define UART_MODBUS_NUM UART_NUM_1
-#define MODBUS_BAUDRATE         9600
-#define MODBUS_RX_PIN           GPIO_NUM_20
-#define MODBUS_TX_PIN           GPIO_NUM_21
-#define MODBUS_STOP_BITS        UART_STOP_BITS_1
-#define MODBUS_RTS_PIN          UART_PIN_NO_CHANGE
-#define MODBUS_CTS_PIN          UART_PIN_NO_CHANGE
-#define MODBUS_RX_BUFFER_SIZE   256
-#define MODBUS_TX_BUFFER_SIZE   256
-#define MODBUS_SLAVE_ADDR       0x01 // Parámetros Modbus PZEM-004T 0xF8 Dirección por defecto
+#define MODBUS_BAUDRATE 9600
+#define MODBUS_RX_PIN GPIO_NUM_20
+#define MODBUS_TX_PIN GPIO_NUM_21
+#define MODBUS_STOP_BITS UART_STOP_BITS_1
+#define MODBUS_RTS_PIN UART_PIN_NO_CHANGE
+#define MODBUS_CTS_PIN UART_PIN_NO_CHANGE
+#define MODBUS_RX_BUFFER_SIZE 256
+#define MODBUS_TX_BUFFER_SIZE 256
+#define MODBUS_SLAVE_ADDR 0x01 // Parámetros Modbus PZEM-004T 0xF8 Dirección por defecto
 #define MODBUS_RESPONSE_TIMEOUT_MS 200
-#define MODBUS_READ             0x04       // Función Modbus para leer registros de entrada
-#define MODBUS_DIR_READ         0x0000 // Dirección inicial para leer registros de entrada
+#define MODBUS_READ 0x04       // Función Modbus para leer registros de entrada
+#define MODBUS_DIR_READ 0x0000 // Dirección inicial para leer registros de entrada
 
 // Definiciones de pines
-#define ENCODER_PIN_A   GPIO_NUM_7
-#define ENCODER_PIN_B   GPIO_NUM_10
-#define PASO_CERO       GPIO_NUM_1
+#define ENCODER_PIN_A GPIO_NUM_7
+#define ENCODER_PIN_B GPIO_NUM_10
+#define PASO_CERO GPIO_NUM_1
 
 // Configuración I2C
-#define I2C_MASTER_SCL_IO   GPIO_NUM_9
-#define I2C_MASTER_SDA_IO   GPIO_NUM_8
-#define I2C_MASTER_FREQ_HZ  100000
-#define SH1106_I2C_ADDRESS  0x3C
+#define I2C_MASTER_SCL_IO GPIO_NUM_9
+#define I2C_MASTER_SDA_IO GPIO_NUM_8
+#define I2C_MASTER_FREQ_HZ 100000
+#define SH1106_I2C_ADDRESS 0x3C
 i2c_master_bus_handle_t bus_handle = nullptr;
 i2c_master_dev_handle_t sh1106_dev_handle = nullptr;
 SH1106 *oled_display = nullptr; // Instancia global del display
@@ -42,25 +43,28 @@ SH1106 *oled_display = nullptr; // Instancia global del display
 #include "rom/ets_sys.h"   // Para ets_delay_us
 #define ANCHO_PULSO_US 530 // Duración del pulso en ALTO (fijo)
 // Variable global para el tiempo de espera antes del disparo (0 a 10.000 us)
-// "volatile" es vital para que el compilador sepa que esto cambia en tiempo real
-volatile uint64_t tiempo_espera_us = 0;
-esp_timer_handle_t timer_handle; // Handle del timer para el retardo
+volatile uint64_t tiempo_espera_us = 0; // "volatile" es vital para que el compilador sepa que esto cambia en tiempo real
+esp_timer_handle_t timer_handle;        // Handle del timer para el retardo
+
+// Modo inicial: true = AUTOMATICO, false = MANUAL
+bool mode = true;
 
 // Instancia del encoder
 Encoder *rotary_encoder = nullptr;
 Encoder *manual_enconder = nullptr;
 
-bool init_i2c();                            // Configura I2C
-bool init_gpio();                           // Configura GPIO
-bool init_interrupts(void *mode);           // Configura interrupciones GPIO
-void IRAM_ATTR isr_paso_cero(void *arg);    // Manejador de interrupciones paso por cero
-void pantalla();                            // Funcion imprime en pantalla
-void estado_botones(bool *confirm_state);   // Funcion lee estado botones
-void update_encoder_display_auto(void *arg);// FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO AUTOMATICO
-void update_encoder_display_manual();       // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO MANUAL
-void verificar_pantalla_128x64();           // Función de diagnóstico de pantalla 128x64
-void timer_init();                          // Inicializa el timer de alta resolución
-void timer_callback(void *arg);             // Callback del timer de retardo
+bool init_i2c();                             // Configura I2C
+bool init_gpio();                            // Configura GPIO
+bool init_interrupts(void *mode);            // Configura interrupciones GPIO
+void IRAM_ATTR isr_paso_cero(void *arg);     // Manejador de interrupciones paso por cero
+void pantalla();                             // Funcion imprime en pantalla
+void estado_botones();                       // Funcion lee estado botones
+void update_encoder_display_auto(void *arg); // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO AUTOMATICO
+void update_encoder_display_manual();        // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO MANUAL
+void verificar_pantalla_128x64();            // Función de diagnóstico de pantalla 128x64
+void timer_init();                           // Inicializa el timer de alta resolución
+void timer_callback(void *arg);              // Callback del timer de retardo
+void leer_pzem_004(void *arg);               // Tarea para leer datos del PZEM-004T
 
 // Estructura para datos PZEM-004T
 typedef struct
@@ -74,18 +78,17 @@ typedef struct
     uint16_t alarms;
 } pzem_data_t;
 
-static void init_modbus_uart(void); // Inicializar UART para Modbus
+static void init_modbus_uart(void);                 // Inicializar UART para Modbus
 static esp_err_t read_pzem_data(pzem_data_t *data); // Leer datos del PZEM-004T
 // Leer respuesta Modbus
 static esp_err_t read_modbus_response(uint8_t *buffer, uint16_t *length, uint16_t max_length);
 // Enviar comando Modbus RTU
 static esp_err_t send_modbus_command(uint8_t slave_addr, uint8_t function_code,
-    uint16_t start_addr, uint16_t reg_count);
+                                     uint16_t start_addr, uint16_t reg_count);
 // Función para calcular CRC16 Modbus
 static uint16_t calculate_crc16(const uint8_t *data, uint16_t length);
 // Verificar CRC de respuesta
 static bool verify_crc(const uint8_t *data, uint16_t length);
-
 
 /******************************************************************************************************/
 /*                                                                                                    */
@@ -94,7 +97,6 @@ static bool verify_crc(const uint8_t *data, uint16_t length);
 /******************************************************************************************************/
 extern "C" void app_main()
 {
-    bool mode = true;         // Modo de funcionamiento true = automático, false = manual
     int enconder_auto_last;   // Valor del Encoder en modo automático
     int enconder_manual_last; // Valor del encoder en modo manual
 
@@ -106,6 +108,16 @@ extern "C" void app_main()
 
     init_modbus_uart();    // Inicializar UART para Modbus
     pzem_data_t pzem_data; // Estructura para datos PZEM-004T
+
+    // Crear tarea para leer datos del PZEM-004T periódicamente
+    xTaskCreate(
+        leer_pzem_004,   // La funcion que lee el PZEM-004T
+        "Leer_PZEM_004", // Nombre de la tarea
+        4096,            // Tamaño de la pila
+        &pzem_data,      // Parámetro que se le pasa a la tarea
+        5,               // Prioridad de la tarea
+        NULL             // Handle de la tarea (no se usa)
+    );
 
     // Crear instancia del display pasando el handle del dispositivo I2C
     oled_display = new SH1106(sh1106_dev_handle);
@@ -129,7 +141,7 @@ extern "C" void app_main()
     }
 
     // Crear e inicializar el encoder automatico y manual
-    rotary_encoder = new Encoder(ENCODER_PIN_A, ENCODER_PIN_B, -1000, 1000, 10, 1, 150);
+    rotary_encoder = new Encoder(ENCODER_PIN_A, ENCODER_PIN_B, -1000, 1000, 10, 5, 150);
     rotary_encoder->init();
 
     manual_enconder = new Encoder(ENCODER_PIN_A, ENCODER_PIN_B, 0, 1500, 100, 10, 150);
@@ -138,8 +150,6 @@ extern "C" void app_main()
     pantalla(); // Mostrar pantalla inicial
 
     read_pzem_data(&pzem_data); // Leer datos del PZEM-004T
-    printf("Voltaje inicial PZEM: %.1f V\n", pzem_data.voltage);
-    
 
     enconder_auto_last = rotary_encoder->get_count();    // Valor inicial del encoder en modo automático
     enconder_manual_last = manual_enconder->get_count(); // Valor inicial del encoder en modo manual
@@ -147,9 +157,7 @@ extern "C" void app_main()
 
     while (1)
     {
-        estado_botones(&mode);  // Leer botones BACK y CONFIRM
-        //read_pzem_data(&pzem_data); // Leer datos del PZEM-004T
-        
+        estado_botones(); // Leer botones BACK y CONFIRM
 
         if (mode)
         { // Modo AUTOMATICO
@@ -164,12 +172,13 @@ extern "C" void app_main()
         else
         {
             // Modo MANUAL
-            manual_enconder->update();
+            manual_enconder->update(); // Lee el encoder
             // Actualizar display del encoder si hay cambios
             if (manual_enconder->get_count() != enconder_manual_last)
             {
                 update_encoder_display_manual();
                 enconder_manual_last = manual_enconder->get_count();
+                // Pasa de watios a microsegundos
                 tiempo_espera_us = 10000.0f - ((float)enconder_manual_last * 6.666667f);
             }
         }
@@ -180,6 +189,51 @@ extern "C" void app_main()
 /*********************************************************************************************************
                          FUNCIONES AUXILIARES
 **********************************************************************************************************/
+
+// Tarea para leer datos del PZEM-004T
+void leer_pzem_004(void *arg)
+{
+    // Tengo que castear el puntero void* al tipo correcto
+    pzem_data_t &pzem_data = *(pzem_data_t *)arg;
+    // pzem_data_t pzem_data;
+    esp_err_t ret;
+
+    while (1)
+    {
+        ret = read_pzem_data(&pzem_data);
+
+        if (ret != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Error leyendo datos PZEM-004T: %s", esp_err_to_name(ret));
+        }
+
+        /*
+        ESP_LOGI(TAG, "PZEM-004T Datos: V=%.1fV I=%.3fA P=%.1fW E=%.3fkWh F=%.1fHz PF=%.2f Alarms=0x%04X",
+                     pzem_data.voltage,
+                     pzem_data.current,
+                     pzem_data.power,
+                     pzem_data.energy,
+                     pzem_data.frequency,
+                     pzem_data.power_factor,
+                     pzem_data.alarms);
+        */
+
+        if (mode) // Modo AUTOMATICO
+        {
+            // 2. Crear un buffer (espacio en memoria) para guardar el texto
+            char buffer[20];                                               // 20 caracteres son suficientes para "123.4 V"
+            snprintf(buffer, sizeof(buffer), "%.0f V", pzem_data.voltage); // 3. Formatear el float dentro del buffer
+            oled_display->drawString(90, 1, buffer);                       // 4. Pasamos 'buffer' que ahora contiene el texto formateado
+
+            snprintf(buffer, sizeof(buffer), "%.0f W", pzem_data.power);
+            oled_display->drawString(90, 0, buffer); // Potencia Placa Solar
+
+            oled_display->update();
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100)); // Esperar milisegundos antes de la siguiente lectura
+    }
+}
 
 // Leer datos del PZEM-004T
 static esp_err_t read_pzem_data(pzem_data_t *data)
@@ -381,28 +435,28 @@ void pantalla()
     }
 }
 
-void estado_botones(bool *confirm_state)
+void estado_botones()
 {
     // pulsado botón CONFIRM (GPIO6)
     if (gpio_get_level(GPIO_NUM_6) == 0)
     {
-        *confirm_state = !*confirm_state;
+        mode = !mode; // Cambiar estado del modo
 
-        if (*confirm_state == 1)
+        if (mode)
         {
-            oled_display->drawString(70, 3, "     ");
+            oled_display->drawString(70, 3, "     "); // Borra potencia manual
             oled_display->drawString(2, 5, "Casa  (W):");
             oled_display->drawString(2, 7, "Modo: AUTOMATICO");
             oled_display->update();
-            //update_encoder_display_auto(&pzem_data);
         }
         else
         {
-            oled_display->drawString(70, 5, "     ");
+            oled_display->drawString(70, 5, "     "); // Borra potencia automática
             oled_display->drawString(2, 7, "Modo: MANUAL     ");
             oled_display->update();
             update_encoder_display_manual();
         }
+
         // Pequeña demora para evitar rebotes
         vTaskDelay(pdMS_TO_TICKS(200));
     }
@@ -410,7 +464,7 @@ void estado_botones(bool *confirm_state)
     // Pulsado botón BACK (GPIO5)
     if (gpio_get_level(GPIO_NUM_5) == 0)
     {
-        if (!*confirm_state)
+        if (!mode)
         {
             manual_enconder->set_count(0);
         }
@@ -571,11 +625,22 @@ void update_encoder_display_auto(void *arg)
 {
     if (oled_display && rotary_encoder)
     {
-        printf("Voltaje PZEM: %.1f V\n", ((pzem_data_t *)arg)->voltage);
-        char buffer[5];
-        //snprintf(buffer, sizeof(buffer), "%f", ((pzem_data_t *)arg)->voltage);
-        oled_display->drawString(85, 1, "123,4 v"); // Limpiar área anterior
-        //oled_display->drawString(70, 1, buffer); //Voltaje Placa
+        // 1. Castear (convertir) el argumento void* a tu estructura
+        pzem_data_t *datos = (pzem_data_t *)arg;
+
+        if (datos == NULL)
+            return; // Verificar que los datos no sean nulos para evitar reinicios
+
+        // 2. Crear un buffer (espacio en memoria) para guardar el texto
+        char buffer[18]; // 20 caracteres son suficientes para "123.4 V"
+
+        snprintf(buffer, sizeof(buffer), "%.0f V", datos->voltage); // 3. Formatear el float dentro del buffer
+
+        oled_display->drawString(90, 1, buffer); // 4. Pasamos 'buffer' que ahora contiene el texto formateado
+
+        snprintf(buffer, sizeof(buffer), "%.0f W", datos->power);
+        oled_display->drawString(90, 0, buffer); // Potencia Placa Solar
+
         snprintf(buffer, sizeof(buffer), "%d", rotary_encoder->get_count());
         oled_display->drawString(70, 5, "     "); // Limpiar área anterior
         oled_display->drawString(70, 5, buffer);
@@ -589,7 +654,7 @@ void update_encoder_display_manual()
     if (oled_display && manual_enconder)
     {
         char buffer[5];
-        // itaa utiliza menos memoria que snprintf()
+        // itoa utiliza menos memoria que snprintf()
         itoa(manual_enconder->get_count(), buffer, 10);
         oled_display->drawString(70, 3, "     "); // Limpiar área anterior
         oled_display->drawString(70, 3, buffer);
