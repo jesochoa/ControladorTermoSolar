@@ -41,7 +41,10 @@ SH1106 *oled_display = nullptr; // Instancia global del display
 
 // Configuración Timer y retardo
 #include "rom/ets_sys.h"   // Para ets_delay_us
-#define ANCHO_PULSO_US 530 // Duración del pulso en ALTO (fijo)
+// El ancho del pulso de disparo en microsegundos son 500us y 5V en el modulo SRC
+#define ANCHO_PULSO_US 30 // pulso de ≥20–100 µs para que la probabilidad de disparo sea alta para 5mA
+#define MINIMA_POTENCIA 29.0f // minima potencia en watios para disparar el SRC correctamente
+
 // Variable global para el tiempo de espera antes del disparo (0 a 10.000 us)
 volatile uint64_t tiempo_espera_us = 0; // "volatile" es vital para que el compilador sepa que esto cambia en tiempo real
 esp_timer_handle_t timer_handle;        // Handle del timer para el retardo
@@ -52,19 +55,6 @@ bool mode = true;
 // Instancia del encoder
 Encoder *rotary_encoder = nullptr;
 Encoder *manual_enconder = nullptr;
-
-bool init_i2c();                             // Configura I2C
-bool init_gpio();                            // Configura GPIO
-bool init_interrupts(void *mode);            // Configura interrupciones GPIO
-void IRAM_ATTR isr_paso_cero(void *arg);     // Manejador de interrupciones paso por cero
-void pantalla();                             // Funcion imprime en pantalla
-void estado_botones();                       // Funcion lee estado botones
-void update_encoder_display_auto(void *arg); // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO AUTOMATICO
-void update_encoder_display_manual();        // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO MANUAL
-void verificar_pantalla_128x64();            // Función de diagnóstico de pantalla 128x64
-void timer_init();                           // Inicializa el timer de alta resolución
-void timer_callback(void *arg);              // Callback del timer de retardo
-void leer_pzem_004(void *arg);               // Tarea para leer datos del PZEM-004T
 
 // Estructura para datos PZEM-004T
 typedef struct
@@ -78,10 +68,24 @@ typedef struct
     uint16_t alarms;
 } pzem_data_t;
 
-static void init_modbus_uart(void);                 // Inicializar UART para Modbus
-static esp_err_t read_pzem_data(pzem_data_t *data); // Leer datos del PZEM-004T
+bool init_i2c();                                      // Configura I2C
+bool init_gpio();                                     // Configura GPIO
+bool init_interrupts(void *mode);                     // Configura interrupciones GPIO
+void IRAM_ATTR isr_paso_cero(void *arg);              // Manejador de interrupciones paso por cero
+void pantalla();                                      // Funcion imprime en pantalla
+void estado_botones();                                // Funcion lee estado botones
+void update_encoder_display_auto(pzem_data_t *datos); // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO AUTOMATICO
+void update_encoder_display_manual();                 // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO MANUAL
+void verificar_pantalla_128x64();                     // Función de diagnóstico de pantalla 128x64
+void timer_init();                                    // Inicializa el timer de alta resolución
+void timer_callback(void *arg);                       // Callback del timer de retardo
+void leer_pzem_004(void *arg);                        // Tarea para leer datos del PZEM-004T
+static void init_modbus_uart(void);                   // Inicializar UART para Modbus
+static esp_err_t read_pzem_data(pzem_data_t *data);   // Leer datos del PZEM-004T
+
 // Leer respuesta Modbus
 static esp_err_t read_modbus_response(uint8_t *buffer, uint16_t *length, uint16_t max_length);
+
 // Enviar comando Modbus RTU
 static esp_err_t send_modbus_command(uint8_t slave_addr, uint8_t function_code,
                                      uint16_t start_addr, uint16_t reg_count);
@@ -144,7 +148,7 @@ extern "C" void app_main()
     rotary_encoder = new Encoder(ENCODER_PIN_A, ENCODER_PIN_B, -1000, 1000, 10, 5, 150);
     rotary_encoder->init();
 
-    manual_enconder = new Encoder(ENCODER_PIN_A, ENCODER_PIN_B, 0, 1500, 100, 10, 150);
+    manual_enconder = new Encoder(ENCODER_PIN_A, ENCODER_PIN_B, 0, 1500, 10, 1, 150);
     manual_enconder->init();
 
     pantalla(); // Mostrar pantalla inicial
@@ -153,15 +157,16 @@ extern "C" void app_main()
 
     enconder_auto_last = rotary_encoder->get_count();    // Valor inicial del encoder en modo automático
     enconder_manual_last = manual_enconder->get_count(); // Valor inicial del encoder en modo manual
-    update_encoder_display_auto(&pzem_data);
+
+    update_encoder_display_auto(&pzem_data); // Mostrar valor inicial del encoder en pantalla
 
     while (1)
     {
         estado_botones(); // Leer botones BACK y CONFIRM
 
         if (mode)
-        { // Modo AUTOMATICO
-            rotary_encoder->update();
+        {                             // Modo AUTOMATICO
+            rotary_encoder->update(); // Lee el encoder
             // Actualizar display del encoder si hay cambios
             if (rotary_encoder->get_count() != enconder_auto_last)
             {
@@ -179,7 +184,7 @@ extern "C" void app_main()
                 update_encoder_display_manual();
                 enconder_manual_last = manual_enconder->get_count();
                 // Pasa de watios a microsegundos
-                tiempo_espera_us = 10000.0f - ((float)enconder_manual_last * 6.666667f);
+                tiempo_espera_us = 10000.0f - (((float)enconder_manual_last + MINIMA_POTENCIA ) * 6.666667f);
             }
         }
         vTaskDelay(1); // Pequeña demora para evitar uso excesivo de CPU
@@ -195,7 +200,7 @@ void leer_pzem_004(void *arg)
 {
     // Tengo que castear el puntero void* al tipo correcto
     pzem_data_t &pzem_data = *(pzem_data_t *)arg;
-    // pzem_data_t pzem_data;
+
     esp_err_t ret;
 
     while (1)
@@ -222,13 +227,26 @@ void leer_pzem_004(void *arg)
         {
             // 2. Crear un buffer (espacio en memoria) para guardar el texto
             char buffer[20];                                               // 20 caracteres son suficientes para "123.4 V"
-            snprintf(buffer, sizeof(buffer), "%.0f V", pzem_data.voltage); // 3. Formatear el float dentro del buffer
+            snprintf(buffer, sizeof(buffer), "%.1f V", pzem_data.voltage); // 3. Formatear el float dentro del buffer
+            oled_display->drawString(90, 1, "      ");                     // Limpiar área anterior
             oled_display->drawString(90, 1, buffer);                       // 4. Pasamos 'buffer' que ahora contiene el texto formateado
-
             snprintf(buffer, sizeof(buffer), "%.0f W", pzem_data.power);
             oled_display->drawString(90, 0, buffer); // Potencia Placa Solar
+            snprintf(buffer, sizeof(buffer), "%d", rotary_encoder->get_count());
+            oled_display->drawString(70, 5, "     "); // Limpiar área anterior
+            oled_display->drawString(70, 5, buffer);
 
+            itoa((rotary_encoder->get_count() + 0.0f), buffer, 10); // itoa utiliza menos memoria que snprintf() 0.0f para añadir otencia placa
+            oled_display->drawString(70, 3, "     ");                 // Limpiar área anterior
+            oled_display->drawString(70, 3, buffer);
             oled_display->update();
+            // Calculo la potencia que voy a enviar al Termo
+            // 400.0f tengo que cambiar por pzem_data.power
+            tiempo_espera_us = 10000.0f - (((float)rotary_encoder->get_count() + MINIMA_POTENCIA ) * 6.666667f); //0.0f para añadir otencia placa
+        }
+        else
+        {
+            // En modo MANUAL creo que no hace falta actualizar nada aquí
         }
 
         vTaskDelay(pdMS_TO_TICKS(100)); // Esperar milisegundos antes de la siguiente lectura
@@ -448,6 +466,7 @@ void estado_botones()
             oled_display->drawString(2, 5, "Casa  (W):");
             oled_display->drawString(2, 7, "Modo: AUTOMATICO");
             oled_display->update();
+            // update_encoder_display_auto(nullptr); No funciona bien si no le paso datos y corrompe la memoria
         }
         else
         {
@@ -621,22 +640,16 @@ bool init_interrupts(void *mode)
 }
 
 //  FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN PANTALLA EN MODO AUTOMATICO
-void update_encoder_display_auto(void *arg)
+void update_encoder_display_auto(pzem_data_t *datos)
 {
     if (oled_display && rotary_encoder)
     {
-        // 1. Castear (convertir) el argumento void* a tu estructura
-        pzem_data_t *datos = (pzem_data_t *)arg;
 
-        if (datos == NULL)
-            return; // Verificar que los datos no sean nulos para evitar reinicios
+        char buffer[20]; // 20 caracteres son suficientes para "123.4 V"
 
-        // 2. Crear un buffer (espacio en memoria) para guardar el texto
-        char buffer[18]; // 20 caracteres son suficientes para "123.4 V"
-
-        snprintf(buffer, sizeof(buffer), "%.0f V", datos->voltage); // 3. Formatear el float dentro del buffer
-
-        oled_display->drawString(90, 1, buffer); // 4. Pasamos 'buffer' que ahora contiene el texto formateado
+        snprintf(buffer, sizeof(buffer), "%.1f V", datos->voltage); // 3. Formatear el float dentro del buffer
+        oled_display->drawString(90, 1, "      ");                  // Limpiar área anterior
+        oled_display->drawString(90, 1, buffer);                    // 4. Pasamos 'buffer' que ahora contiene el texto formateado
 
         snprintf(buffer, sizeof(buffer), "%.0f W", datos->power);
         oled_display->drawString(90, 0, buffer); // Potencia Placa Solar
