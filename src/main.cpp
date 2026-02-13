@@ -40,9 +40,9 @@ i2c_master_dev_handle_t sh1106_dev_handle = nullptr;
 SH1106 *oled_display = nullptr; // Instancia global del display
 
 // Configuración Timer y retardo
-#include "rom/ets_sys.h"   // Para ets_delay_us
+#include "rom/ets_sys.h" // Para ets_delay_us
 // El ancho del pulso de disparo en microsegundos son 500us y 5V en el modulo SRC
-#define ANCHO_PULSO_US 30 // pulso de ≥20–100 µs para que la probabilidad de disparo sea alta para 5mA
+#define ANCHO_PULSO_US 30     // pulso de ≥20–100 µs para que la probabilidad de disparo sea alta para 5mA
 #define MINIMA_POTENCIA 29.0f // minima potencia en watios para disparar el SRC correctamente
 
 // Variable global para el tiempo de espera antes del disparo (0 a 10.000 us)
@@ -101,8 +101,8 @@ static bool verify_crc(const uint8_t *data, uint16_t length);
 /******************************************************************************************************/
 extern "C" void app_main()
 {
-    int enconder_auto_last;   // Valor del Encoder en modo automático
-    int enconder_manual_last; // Valor del encoder en modo manual
+    int enconder_auto_last;   // Ultimo valor del Encoder en modo automático
+    int enconder_manual_last; // Ultimo valor del encoder en modo manual
 
     // Inicializaciones
     init_i2c();             // Inicializar I2C
@@ -165,8 +165,10 @@ extern "C" void app_main()
         estado_botones(); // Leer botones BACK y CONFIRM
 
         if (mode)
-        {                             // Modo AUTOMATICO
+        {
+            // Modo AUTOMATICO
             rotary_encoder->update(); // Lee el encoder
+
             // Actualizar display del encoder si hay cambios
             if (rotary_encoder->get_count() != enconder_auto_last)
             {
@@ -178,13 +180,14 @@ extern "C" void app_main()
         {
             // Modo MANUAL
             manual_enconder->update(); // Lee el encoder
+
             // Actualizar display del encoder si hay cambios
             if (manual_enconder->get_count() != enconder_manual_last)
             {
                 update_encoder_display_manual();
                 enconder_manual_last = manual_enconder->get_count();
-                // Pasa de watios a microsegundos
-                tiempo_espera_us = 10000.0f - (((float)enconder_manual_last + MINIMA_POTENCIA ) * 6.666667f);
+                // Pasa de watios a microsegundos para el retardo
+                tiempo_espera_us = 10000.0f - (((float)enconder_manual_last + MINIMA_POTENCIA) * 6.666667f);
             }
         }
         vTaskDelay(1); // Pequeña demora para evitar uso excesivo de CPU
@@ -195,7 +198,7 @@ extern "C" void app_main()
                          FUNCIONES AUXILIARES
 **********************************************************************************************************/
 
-// Tarea para leer datos del PZEM-004T
+// Tarea que lee datos del PZEM-004T en paralelo
 void leer_pzem_004(void *arg)
 {
     // Tengo que castear el puntero void* al tipo correcto
@@ -227,30 +230,65 @@ void leer_pzem_004(void *arg)
         {
             // 2. Crear un buffer (espacio en memoria) para guardar el texto
             char buffer[20];                                               // 20 caracteres son suficientes para "123.4 V"
-            snprintf(buffer, sizeof(buffer), "%.1f V", pzem_data.voltage); // 3. Formatear el float dentro del buffer
+            snprintf(buffer, sizeof(buffer), "%.1f V", pzem_data.voltage); // Formatear el float dentro del buffer
             oled_display->drawString(90, 1, "      ");                     // Limpiar área anterior
-            oled_display->drawString(90, 1, buffer);                       // 4. Pasamos 'buffer' que ahora contiene el texto formateado
-            snprintf(buffer, sizeof(buffer), "%.0f W", pzem_data.power);
-            oled_display->drawString(90, 0, buffer); // Potencia Placa Solar
-            snprintf(buffer, sizeof(buffer), "%d", rotary_encoder->get_count());
-            oled_display->drawString(70, 5, "     "); // Limpiar área anterior
-            oled_display->drawString(70, 5, buffer);
+            oled_display->drawString(90, 1, buffer);                       // Voltaje Placa Solar
 
-            itoa((rotary_encoder->get_count() + 0.0f), buffer, 10); // itoa utiliza menos memoria que snprintf() 0.0f para añadir otencia placa
-            oled_display->drawString(70, 3, "     ");                 // Limpiar área anterior
-            oled_display->drawString(70, 3, buffer);
+            snprintf(buffer, sizeof(buffer), "%.0f W", pzem_data.power);
+            oled_display->drawString(90, 0, "        "); // Limpiar área anterior
+            oled_display->drawString(90, 0, buffer);     // Potencia Placa Solar
+
+            snprintf(buffer, sizeof(buffer), "%d", rotary_encoder->get_count());
+            oled_display->drawString(70, 5, "     ");
+            oled_display->drawString(70, 5, buffer); // Potencia del enconder que le añadira al termo
+
+            itoa((rotary_encoder->get_count() + pzem_data.power), buffer, 10); // itoa utiliza menos memoria que snprintf() 0.0f pero no lo recomiendan
+            oled_display->drawString(70, 3, "     ");
+            oled_display->drawString(70, 3, buffer); // Potencia total (placa + encoder)
+
             oled_display->update();
+
             // Calculo la potencia que voy a enviar al Termo
-            // 400.0f tengo que cambiar por pzem_data.power
-            tiempo_espera_us = 10000.0f - (((float)rotary_encoder->get_count() + MINIMA_POTENCIA ) * 6.666667f); //0.0f para añadir otencia placa
+            // Lo meto aqui ya que la potencia de la placa cambia constantemente
+            // Potencia del enconder + MINIMA_POTENCIA + potencia medida en el PZEM y lo paso a microsegundos
+            tiempo_espera_us = 10000.0f - (((float)rotary_encoder->get_count() + MINIMA_POTENCIA + pzem_data.power) * 6.666667f);
         }
         else
         {
-            // En modo MANUAL creo que no hace falta actualizar nada aquí
+            // En modo MANUAL no hace falta actualizar nada aquí, la potencia ya la tengo fija
+            // La potencia se actualiza en la función principal cuando se mueve el encoder
         }
 
         vTaskDelay(pdMS_TO_TICKS(100)); // Esperar milisegundos antes de la siguiente lectura
     }
+}
+
+// Callback del Timer: Genera el pulso de disparo del SRC
+void timer_callback(void *arg)
+{
+    // Si el tiempo de espera es menor que la minima potencia o > 9999 no hacemos nada
+    // ya que si manda algo el disparo es erratico
+    if ((tiempo_espera_us < MINIMA_POTENCIA * 6.666667f) || tiempo_espera_us > 9999)
+    {
+        return;
+    }
+
+    gpio_set_level(GPIO_NUM_2, 1); // 1. Subir el pin (Inicio del pulso)
+
+    // Bloqueamos la CPU ANCHO_PULSO_US microsegundos para garantizar el disparo
+    ets_delay_us(ANCHO_PULSO_US); // Esperar exactamente ANCHO_PULSO_US microsegundos
+
+    gpio_set_level(GPIO_NUM_2, 0); // Bajar el pin (Fin del pulso)
+}
+
+// Esta es la función que se ejecutará (ISR Handler) para paso por cero
+void IRAM_ATTR isr_paso_cero(void *arg)
+{
+    // Paso de seguridad: Si ya había un timer corriendo (porque si llegaron pulsos muy rápido),
+    // lo detenemos para reiniciar la cuenta. Esto hace el sistema "re-disparable".
+    esp_timer_stop(timer_handle);
+
+    esp_timer_start_once(timer_handle, tiempo_espera_us); // Iniciar el Timer una sola vez
 }
 
 // Leer datos del PZEM-004T
@@ -418,22 +456,6 @@ static bool verify_crc(const uint8_t *data, uint16_t length)
     return (received_crc == calculated_crc);
 }
 
-// Callback del Timer: Genera el pulso de 530us
-void timer_callback(void *arg)
-{
-    if (tiempo_espera_us == 0 || tiempo_espera_us > 9999)
-    {
-        return; // Si el tiempo de espera es 0 o > 9999 no hacemos nada
-    }
-
-    gpio_set_level(GPIO_NUM_2, 1); // 1. Subir el pin (Inicio del pulso)
-
-    // Bloqueamos la CPU 530 microsegundos para garantizar precisión absoluta
-    ets_delay_us(ANCHO_PULSO_US); // 2. Esperar exactamente 530 microsegundos
-
-    gpio_set_level(GPIO_NUM_2, 0); // 3. Bajar el pin (Fin del pulso)
-}
-
 // Función para actualizar la pantalla
 void pantalla()
 {
@@ -599,16 +621,6 @@ void timer_init()
     }
 }
 
-// Esta es la función que se ejecutará (ISR Handler) para paso por cero
-void IRAM_ATTR isr_paso_cero(void *arg)
-{
-    // Paso de seguridad: Si ya había un timer corriendo (porque llegaron pulsos muy rápido),
-    // lo detenemos para reiniciar la cuenta. Esto hace el sistema "re-disparable".
-    esp_timer_stop(timer_handle);
-
-    esp_timer_start_once(timer_handle, tiempo_espera_us); // Iniciar el Timer una sola vez
-}
-
 // Funcion para incializar el GPIO con interrupcion
 bool init_interrupts(void *mode)
 {
@@ -632,6 +644,7 @@ bool init_interrupts(void *mode)
 
     // Instalar el servicio de manejo de interrupciones GPIO_1
     gpio_install_isr_service(0);
+
     // Asociar la función de manejo de interrupciones al pin GPIO_1
     gpio_isr_handler_add(PASO_CERO, isr_paso_cero, &mode);
 
