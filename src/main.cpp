@@ -11,30 +11,30 @@
 #define TAG "OLED_APP"
 
 // Configuración UART para Modbus RTU
-#define UART_MODBUS_NUM UART_NUM_1
-#define MODBUS_BAUDRATE 9600
-#define MODBUS_RX_PIN GPIO_NUM_20
-#define MODBUS_TX_PIN GPIO_NUM_21
-#define MODBUS_STOP_BITS UART_STOP_BITS_1
-#define MODBUS_RTS_PIN UART_PIN_NO_CHANGE
-#define MODBUS_CTS_PIN UART_PIN_NO_CHANGE
-#define MODBUS_RX_BUFFER_SIZE 256
-#define MODBUS_TX_BUFFER_SIZE 256
-#define MODBUS_SLAVE_ADDR 0x01 // Parámetros Modbus PZEM-004T 0xF8 Dirección por defecto
-#define MODBUS_RESPONSE_TIMEOUT_MS 200
-#define MODBUS_READ 0x04       // Función Modbus para leer registros de entrada
-#define MODBUS_DIR_READ 0x0000 // Dirección inicial para leer registros de entrada
+#define UART_MODBUS_NUM             UART_NUM_1
+#define MODBUS_BAUDRATE             9600
+#define MODBUS_RX_PIN               GPIO_NUM_20
+#define MODBUS_TX_PIN               GPIO_NUM_21
+#define MODBUS_STOP_BITS            UART_STOP_BITS_1
+#define MODBUS_RTS_PIN              UART_PIN_NO_CHANGE
+#define MODBUS_CTS_PIN              UART_PIN_NO_CHANGE
+#define MODBUS_RX_BUFFER_SIZE       256
+#define MODBUS_TX_BUFFER_SIZE       256
+#define MODBUS_SLAVE_ADDR           0x01 // Parámetros Modbus PZEM-004T 0xF8 Dirección por defecto
+#define MODBUS_RESPONSE_TIMEOUT_MS  200
+#define MODBUS_READ                 0x04       // Función Modbus para leer registros de entrada
+#define MODBUS_DIR_READ             0x0000 // Dirección inicial para leer registros de entrada
 
 // Definiciones de pines
-#define ENCODER_PIN_A GPIO_NUM_7
-#define ENCODER_PIN_B GPIO_NUM_10
-#define PASO_CERO GPIO_NUM_1
+#define ENCODER_PIN_A   GPIO_NUM_7
+#define ENCODER_PIN_B   GPIO_NUM_10
+#define PASO_CERO       GPIO_NUM_1
 
 // Configuración I2C
-#define I2C_MASTER_SCL_IO GPIO_NUM_9
-#define I2C_MASTER_SDA_IO GPIO_NUM_8
-#define I2C_MASTER_FREQ_HZ 100000
-#define SH1106_I2C_ADDRESS 0x3C
+#define I2C_MASTER_SCL_IO   GPIO_NUM_9
+#define I2C_MASTER_SDA_IO   GPIO_NUM_8
+#define I2C_MASTER_FREQ_HZ  100000
+#define SH1106_I2C_ADDRESS  0x3C
 i2c_master_bus_handle_t bus_handle = nullptr;
 i2c_master_dev_handle_t sh1106_dev_handle = nullptr;
 SH1106 *oled_display = nullptr; // Instancia global del display
@@ -42,11 +42,13 @@ SH1106 *oled_display = nullptr; // Instancia global del display
 // Configuración Timer y retardo
 #include "rom/ets_sys.h" // Para ets_delay_us
 // El ancho del pulso de disparo en microsegundos son 500us y 5V en el modulo SRC
-#define ANCHO_PULSO_US 30     // pulso de ≥20–100 µs para que la probabilidad de disparo sea alta para 5mA
-#define MINIMA_POTENCIA 29.0f // minima potencia en watios para disparar el SRC correctamente
+#define ANCHO_PULSO_US  30     // pulso de ≥20–100 µs para que la probabilidad de disparo sea alta para 5mA
+#define MINIMA_POTENCIA 129.0f // minima potencia en watios para disparar el SRC correctamente es 29W
+#define MINIMA_POTENCIA_PLACA 90.0f // Si la potencia de la placa es menor que este valor, no disparo el SRC 
 
 // Variable global para el tiempo de espera antes del disparo (0 a 10.000 us)
-volatile uint64_t tiempo_espera_us = 0; // "volatile" es vital para que el compilador sepa que esto cambia en tiempo real
+volatile uint64_t tiempo_espera_us = 0; // "volatile" es para que el compilador sepa que esto cambia en tiempo real
+
 esp_timer_handle_t timer_handle;        // Handle del timer para el retardo
 
 // Modo inicial: true = AUTOMATICO, false = MANUAL
@@ -151,23 +153,23 @@ extern "C" void app_main()
     manual_enconder = new Encoder(ENCODER_PIN_A, ENCODER_PIN_B, 0, 1500, 10, 1, 150);
     manual_enconder->init();
 
-    pantalla(); // Mostrar pantalla inicial
+    pantalla();                                           // Mostrar pantalla inicial
 
-    read_pzem_data(&pzem_data); // Leer datos del PZEM-004T
+    read_pzem_data(&pzem_data);                           // Leer datos del PZEM-004T
 
     enconder_auto_last = rotary_encoder->get_count();    // Valor inicial del encoder en modo automático
     enconder_manual_last = manual_enconder->get_count(); // Valor inicial del encoder en modo manual
 
-    update_encoder_display_auto(&pzem_data); // Mostrar valor inicial del encoder en pantalla
+    update_encoder_display_auto(&pzem_data);             // Mostrar valor inicial del encoder en pantalla
 
     while (1)
     {
-        estado_botones(); // Leer botones BACK y CONFIRM
+        estado_botones();                               // Leer botones BACK y CONFIRM
 
         if (mode)
         {
             // Modo AUTOMATICO
-            rotary_encoder->update(); // Lee el encoder
+            rotary_encoder->update();                   // Lee el encoder
 
             // Actualizar display del encoder si hay cambios
             if (rotary_encoder->get_count() != enconder_auto_last)
@@ -179,7 +181,7 @@ extern "C" void app_main()
         else
         {
             // Modo MANUAL
-            manual_enconder->update(); // Lee el encoder
+            manual_enconder->update();              // Lee el encoder
 
             // Actualizar display del encoder si hay cambios
             if (manual_enconder->get_count() != enconder_manual_last)
@@ -229,29 +231,34 @@ void leer_pzem_004(void *arg)
         if (mode) // Modo AUTOMATICO
         {
             // 2. Crear un buffer (espacio en memoria) para guardar el texto
-            char buffer[20];                                               // 20 caracteres son suficientes para "123.4 V"
-            snprintf(buffer, sizeof(buffer), "%.1f V", pzem_data.voltage); // Formatear el float dentro del buffer
-            oled_display->drawString(90, 1, "      ");                     // Limpiar área anterior
-            oled_display->drawString(90, 1, buffer);                       // Voltaje Placa Solar
-
+            char buffer[20]; // 20 caracteres son suficientes para "123.4 V"
+            
             snprintf(buffer, sizeof(buffer), "%.0f W", pzem_data.power);
             oled_display->drawString(90, 0, "        "); // Limpiar área anterior
             oled_display->drawString(90, 0, buffer);     // Potencia Placa Solar
-
-            snprintf(buffer, sizeof(buffer), "%d", rotary_encoder->get_count());
-            oled_display->drawString(70, 5, "     ");
-            oled_display->drawString(70, 5, buffer); // Potencia del enconder que le añadira al termo
+            
+            snprintf(buffer, sizeof(buffer), "%.1f V", pzem_data.voltage); // Formatear el float dentro del buffer
+            oled_display->drawString(90, 1, "      ");                     // Limpiar área anterior
+            oled_display->drawString(90, 1, buffer);                       // Voltaje Placa Solar
 
             itoa((rotary_encoder->get_count() + pzem_data.power), buffer, 10); // itoa utiliza menos memoria que snprintf() 0.0f pero no lo recomiendan
             oled_display->drawString(70, 3, "     ");
             oled_display->drawString(70, 3, buffer); // Potencia total (placa + encoder)
 
+            snprintf(buffer, sizeof(buffer), "%d", rotary_encoder->get_count());
+            oled_display->drawString(70, 5, "     ");
+            oled_display->drawString(70, 5, buffer); // Potencia del enconder que le añadira al termo
+ 
             oled_display->update();
 
             // Calculo la potencia que voy a enviar al Termo
             // Lo meto aqui ya que la potencia de la placa cambia constantemente
             // Potencia del enconder + MINIMA_POTENCIA + potencia medida en el PZEM y lo paso a microsegundos
             tiempo_espera_us = 10000.0f - (((float)rotary_encoder->get_count() + MINIMA_POTENCIA + pzem_data.power) * 6.666667f);
+            if (pzem_data.power < MINIMA_POTENCIA_PLACA) // Si la potencia de la placa es baja, no disparo el SRC
+            {
+                tiempo_espera_us = 0; // No disparar
+            }
         }
         else
         {
@@ -259,7 +266,7 @@ void leer_pzem_004(void *arg)
             // La potencia se actualiza en la función principal cuando se mueve el encoder
         }
 
-        vTaskDelay(pdMS_TO_TICKS(100)); // Esperar milisegundos antes de la siguiente lectura
+        vTaskDelay(pdMS_TO_TICKS(200)); // Esperar milisegundos antes de la siguiente lectura estaba en 100ms lo subo haber si no se bloquea
     }
 }
 
@@ -268,10 +275,12 @@ void timer_callback(void *arg)
 {
     // Si el tiempo de espera es menor que la minima potencia o > 9999 no hacemos nada
     // ya que si manda algo el disparo es erratico
-    if ((tiempo_espera_us < MINIMA_POTENCIA * 6.666667f) || tiempo_espera_us > 9999)
+    if ((tiempo_espera_us < (MINIMA_POTENCIA * 6.666667f)) || tiempo_espera_us > 9999)
     {
         return;
     }
+
+    
 
     gpio_set_level(GPIO_NUM_2, 1); // 1. Subir el pin (Inicio del pulso)
 
@@ -294,7 +303,7 @@ void IRAM_ATTR isr_paso_cero(void *arg)
 // Leer datos del PZEM-004T
 static esp_err_t read_pzem_data(pzem_data_t *data)
 {
-    uint8_t bytes_to_read = 25; // Leer 25 bytes de datos
+    uint8_t bytes_to_read = 25;             // Leer 25 bytes de datos
     uint8_t response_buffer[bytes_to_read];
     uint16_t response_length = 0;
 
@@ -355,8 +364,8 @@ static esp_err_t send_modbus_command(uint8_t slave_addr, uint8_t function_code,
 
     // Calcular CRC
     uint16_t crc = calculate_crc16(frame, 6);
-    frame[6] = crc & 0xFF;        // CRC low byte
-    frame[7] = (crc >> 8) & 0xFF; // CRC high byte
+    frame[6] = crc & 0xFF;               // CRC low byte
+    frame[7] = (crc >> 8) & 0xFF;        // CRC high byte
 
     // Enviar frame
     int bytes_written = uart_write_bytes(UART_MODBUS_NUM, (const char *)frame, sizeof(frame));
