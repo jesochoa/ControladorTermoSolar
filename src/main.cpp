@@ -13,8 +13,8 @@
 // Configuración UART para Modbus RTU
 #define UART_MODBUS_NUM             UART_NUM_1
 #define MODBUS_BAUDRATE             9600
-#define MODBUS_RX_PIN               GPIO_NUM_20
-#define MODBUS_TX_PIN               GPIO_NUM_21
+#define MODBUS_RX_PIN               GPIO_NUM_2
+#define MODBUS_TX_PIN               GPIO_NUM_3
 #define MODBUS_STOP_BITS            UART_STOP_BITS_1
 #define MODBUS_RTS_PIN              UART_PIN_NO_CHANGE
 #define MODBUS_CTS_PIN              UART_PIN_NO_CHANGE
@@ -26,13 +26,18 @@
 #define MODBUS_DIR_READ             0x0000 // Dirección inicial para leer registros de entrada
 
 // Definiciones de pines
-#define ENCODER_PIN_A   GPIO_NUM_7
-#define ENCODER_PIN_B   GPIO_NUM_10
+#define ENCODER_PIN_A   GPIO_NUM_6
+#define ENCODER_PIN_B   GPIO_NUM_7
 #define PASO_CERO       GPIO_NUM_1
+#define SCR             GPIO_NUM_21
+#define BOTON_BACK      GPIO_NUM_5
+#define BOTON_CONFIRM   GPIO_NUM_20
+#define BOTON_PUSH      GPIO_NUM_8
+
 
 // Configuración I2C
 #define I2C_MASTER_SCL_IO   GPIO_NUM_9
-#define I2C_MASTER_SDA_IO   GPIO_NUM_8
+#define I2C_MASTER_SDA_IO   GPIO_NUM_10
 #define I2C_MASTER_FREQ_HZ  100000
 #define SH1106_I2C_ADDRESS  0x3C
 i2c_master_bus_handle_t bus_handle = nullptr;
@@ -279,12 +284,12 @@ void timer_callback(void *arg)
         return;
     }  
 
-    gpio_set_level(GPIO_NUM_2, 1); // 1. Subir el pin (Inicio del pulso)
+    gpio_set_level(SCR, 1); // 1. Subir el pin (Inicio del pulso)
 
     // Bloqueamos la CPU ANCHO_PULSO_US microsegundos para garantizar el disparo
     ets_delay_us(ANCHO_PULSO_US); // Esperar exactamente ANCHO_PULSO_US microsegundos
 
-    gpio_set_level(GPIO_NUM_2, 0); // Bajar el pin (Fin del pulso)
+    gpio_set_level(SCR, 0); // Bajar el pin (Fin del pulso)
 }
 
 // Esta es la función que se ejecutará (ISR Handler) para paso por cero
@@ -488,8 +493,8 @@ void pantalla()
 
 void estado_botones()
 {
-    // pulsado botón CONFIRM (GPIO6)
-    if (gpio_get_level(GPIO_NUM_6) == 0)
+    // pulsado botón CONFIRM 
+    if (gpio_get_level(BOTON_CONFIRM) == 0)
     {
         mode = !mode; // Cambiar estado del modo
 
@@ -512,8 +517,8 @@ void estado_botones()
         vTaskDelay(pdMS_TO_TICKS(200));
     }
 
-    // Pulsado botón BACK (GPIO5)
-    if (gpio_get_level(GPIO_NUM_5) == 0)
+    // Pulsado botón BACK 
+    if (gpio_get_level(BOTON_BACK) == 0)
     {
         if (!mode)
         {
@@ -580,7 +585,7 @@ bool init_gpio()
 
     // Configurar GPIO  BACK y CONFIRM como entradas
     gpio_config_t io_conf = {
-        .pin_bit_mask = ((1ULL << GPIO_NUM_5) | (1ULL << GPIO_NUM_6)), // Botones BACK y CONFIRM
+        .pin_bit_mask = ((1ULL << BOTON_BACK) | (1ULL << BOTON_CONFIRM)), // Botones BACK y CONFIRM
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -593,8 +598,8 @@ bool init_gpio()
         return false;
     }
 
-    // Configurar GPIO_2 como salida para el modulo SRC
-    io_conf.pin_bit_mask = (1ULL << GPIO_NUM_2); // Pin GPIO2 para salida
+    // Configurar SCR como salida para el modulo SRC
+    io_conf.pin_bit_mask = (1ULL << SCR); // Pin SCR para salida
     io_conf.mode = GPIO_MODE_OUTPUT;
     ret = gpio_config(&io_conf);
     if (ret != ESP_OK)
@@ -602,7 +607,7 @@ bool init_gpio()
         ESP_LOGE(TAG, "Error configurando GPIO_2: %s", esp_err_to_name(ret));
         return false;
     }
-    gpio_set_level(GPIO_NUM_2, 0); // Inicialmente en bajo
+    gpio_set_level(SCR, 0); // Inicialmente en bajo
 
     ESP_LOGI(TAG, "GPIO inicializado correctamente");
     return true;
