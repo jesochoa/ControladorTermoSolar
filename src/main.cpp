@@ -70,20 +70,20 @@ typedef struct
     uint16_t alarms;
 } pzem_data_t;
 
-bool init_i2c();                                      // Configura I2C
-bool init_gpio();                                     // Configura GPIO
-bool init_interrupts(void *mode);                     // Configura interrupciones GPIO
-void IRAM_ATTR isr_paso_cero(void *arg);              // Manejador de interrupciones paso por cero
-void pantalla();                                      // Funcion imprime en pantalla
-void estado_botones();                                // Funcion lee estado botones
-void update_encoder_display_auto(pzem_data_t *datos); // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO AUTOMATICO
-void update_encoder_display_manual();                 // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO MANUAL
-void verificar_pantalla_128x64();                     // Función de diagnóstico de pantalla 128x64
-void timer_init();                                    // Inicializa el timer de alta resolución
-void timer_callback(void *arg);                       // Callback del timer de retardo
-void leer_pzem_004(void *arg);                        // Tarea para leer datos del PZEM-004T
-static void init_modbus_uart(void);                   // Inicializar UART para Modbus
-static esp_err_t read_pzem_data(pzem_data_t *data);   // Leer datos del PZEM-004T
+bool init_i2c();                                     // Configura I2C
+bool init_gpio();                                    // Configura GPIO
+bool init_interrupts(void *arg);                     // Configura interrupciones GPIO
+void isr_paso_cero(void *arg);                       // Manejador de interrupciones paso por cero, quito IRAM_ATTR
+void pantalla();                                     // Funcion imprime en pantalla
+void estado_botones();                               // Funcion lee estado botones
+void update_encoder_display_auto(pzem_data_t *datos);// FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO AUTOMATICO
+void update_encoder_display_manual();                // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO MANUAL
+void verificar_pantalla_128x64();                    // Función de diagnóstico de pantalla 128x64
+void timer_init();                                   // Inicializa el timer de alta resolución
+void timer_callback(void *arg);                      // Callback del timer de retardo
+void leer_pzem_004(void *arg);                       // Tarea para leer datos del PZEM-004T
+static void init_modbus_uart(void);                  // Inicializar UART para Modbus
+static esp_err_t read_pzem_data(pzem_data_t *data);  // Leer datos del PZEM-004T
 
 // Leer respuesta Modbus
 static esp_err_t read_modbus_response(uint8_t *buffer, uint16_t *length, uint16_t max_length);
@@ -203,8 +203,10 @@ extern "C" void app_main()
 // Tarea que lee datos del PZEM-004T en paralelo
 void leer_pzem_004(void *arg)
 {
-    // Tengo que castear el puntero void* al tipo correcto
-    pzem_data_t &pzem_data = *(pzem_data_t *)arg;
+    pzem_data_t &pzem_data = *(pzem_data_t *)arg; // Tengo que castear el puntero void* al tipo correcto
+   
+    // Crear un buffer para guardar el texto
+    char buffer[20]; // 20 caracteres son suficientes para "123.4 V"
 
     esp_err_t ret;
 
@@ -230,12 +232,9 @@ void leer_pzem_004(void *arg)
 
         if (mode) // Modo AUTOMATICO
         {
-            // 2. Crear un buffer (espacio en memoria) para guardar el texto
-            char buffer[20]; // 20 caracteres son suficientes para "123.4 V"
-            
             snprintf(buffer, sizeof(buffer), "%.0f W", pzem_data.power);
-            oled_display->drawString(90, 0, "        "); // Limpiar área anterior
-            oled_display->drawString(90, 0, buffer);     // Potencia Placa Solar
+            oled_display->drawString(90, 0, "      ");                      // Limpiar área anterior
+            oled_display->drawString(90, 0, buffer);                        // Potencia Placa Solar
             
             snprintf(buffer, sizeof(buffer), "%.1f V", pzem_data.voltage); // Formatear el float dentro del buffer
             oled_display->drawString(90, 1, "      ");                     // Limpiar área anterior
@@ -243,11 +242,11 @@ void leer_pzem_004(void *arg)
 
             itoa((rotary_encoder->get_count() + pzem_data.power), buffer, 10); // itoa utiliza menos memoria que snprintf() 0.0f pero no lo recomiendan
             oled_display->drawString(70, 3, "     ");
-            oled_display->drawString(70, 3, buffer); // Potencia total (placa + encoder)
+            oled_display->drawString(70, 3, buffer);                     // Potencia total (placa + encoder)
 
             snprintf(buffer, sizeof(buffer), "%d", rotary_encoder->get_count());
             oled_display->drawString(70, 5, "     ");
-            oled_display->drawString(70, 5, buffer); // Potencia del enconder que le añadira al termo
+            oled_display->drawString(70, 5, buffer);                    // Potencia del enconder que le añadira al termo
  
             oled_display->update();
 
@@ -257,7 +256,7 @@ void leer_pzem_004(void *arg)
             tiempo_espera_us = 10000.0f - (((float)rotary_encoder->get_count() + MINIMA_POTENCIA + pzem_data.power) * 6.666667f);
             if (pzem_data.power < MINIMA_POTENCIA_PLACA) // Si la potencia de la placa es baja, no disparo el SRC
             {
-                tiempo_espera_us = 0; // No disparar
+                tiempo_espera_us = 0; // No disparar el SRC si la potencia de la placa es baja
             }
         }
         else
@@ -266,7 +265,7 @@ void leer_pzem_004(void *arg)
             // La potencia se actualiza en la función principal cuando se mueve el encoder
         }
 
-        vTaskDelay(pdMS_TO_TICKS(200)); // Esperar milisegundos antes de la siguiente lectura estaba en 100ms lo subo haber si no se bloquea
+        vTaskDelay(pdMS_TO_TICKS(200)); // Esperar 200 milisegundos antes de la siguiente lectura estaba en 100ms lo subo haber si no se bloquea
     }
 }
 
@@ -278,9 +277,7 @@ void timer_callback(void *arg)
     if ((tiempo_espera_us < (MINIMA_POTENCIA * 6.666667f)) || tiempo_espera_us > 9999)
     {
         return;
-    }
-
-    
+    }  
 
     gpio_set_level(GPIO_NUM_2, 1); // 1. Subir el pin (Inicio del pulso)
 
@@ -415,7 +412,12 @@ static void init_modbus_uart(void)
         .parity = UART_PARITY_DISABLE,
         .stop_bits = MODBUS_STOP_BITS,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .rx_flow_ctrl_thresh = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
+        .flags = {
+            .allow_pd = 0, // No permitir que el dominio de energía se apague
+            .backup_before_sleep = 0,
+        },
     };
 
     ESP_ERROR_CHECK(uart_param_config(UART_MODBUS_NUM, &uart_config));
@@ -497,7 +499,6 @@ void estado_botones()
             oled_display->drawString(2, 5, "Casa  (W):");
             oled_display->drawString(2, 7, "Modo: AUTOMATICO");
             oled_display->update();
-            // update_encoder_display_auto(nullptr); No funciona bien si no le paso datos y corrompe la memoria
         }
         else
         {
@@ -669,15 +670,16 @@ void update_encoder_display_auto(pzem_data_t *datos)
 
         char buffer[20]; // 20 caracteres son suficientes para "123.4 V"
 
-        snprintf(buffer, sizeof(buffer), "%.1f V", datos->voltage); // 3. Formatear el float dentro del buffer
-        oled_display->drawString(90, 1, "      ");                  // Limpiar área anterior
-        oled_display->drawString(90, 1, buffer);                    // 4. Pasamos 'buffer' que ahora contiene el texto formateado
+        snprintf(buffer, sizeof(buffer), "%.0f W", datos->power);   // Formatear el float dentro del buffer
+        oled_display->drawString(90, 0, "      ");                  // Limpiar área anterior
+        oled_display->drawString(90, 0, buffer);                    // Potencia Placa Solar
 
-        snprintf(buffer, sizeof(buffer), "%.0f W", datos->power);
-        oled_display->drawString(90, 0, buffer); // Potencia Placa Solar
+        snprintf(buffer, sizeof(buffer), "%.1f V", datos->voltage); 
+        oled_display->drawString(90, 1, "      ");                  // Limpiar área anterior
+        oled_display->drawString(90, 1, buffer);                    // Pasamos 'buffer' que ahora contiene el texto formateado
 
         snprintf(buffer, sizeof(buffer), "%d", rotary_encoder->get_count());
-        oled_display->drawString(70, 5, "     "); // Limpiar área anterior
+        oled_display->drawString(70, 5, "     ");                   // Limpiar área anterior
         oled_display->drawString(70, 5, buffer);
         oled_display->update();
     }
