@@ -5,25 +5,26 @@
 #include "sh1106.h"
 #include "encoder.h"
 #include "esp_timer.h"
-#include "driver/uart.h"   // Para comunicación Modbus RTU
-#include "freertos/task.h" // Para leer PZEM-004T periódicamente
+#include "driver/uart.h"        // Para comunicación Modbus RTU
+#include "freertos/task.h"      // Para leer PZEM-004T periódicamente
+#include "freertos/semphr.h"    // Librería para usar semáforos
 
 #define TAG "OLED_APP"
 
 // Configuración UART para Modbus RTU
 #define UART_MODBUS_NUM             UART_NUM_1
 #define MODBUS_BAUDRATE             9600
-#define MODBUS_RX_PIN               GPIO_NUM_2
+#define MODBUS_RX_PIN               GPIO_NUM_4
 #define MODBUS_TX_PIN               GPIO_NUM_3
 #define MODBUS_STOP_BITS            UART_STOP_BITS_1
 #define MODBUS_RTS_PIN              UART_PIN_NO_CHANGE
 #define MODBUS_CTS_PIN              UART_PIN_NO_CHANGE
 #define MODBUS_RX_BUFFER_SIZE       256
 #define MODBUS_TX_BUFFER_SIZE       256
-#define MODBUS_SLAVE_ADDR           0x01 // Parámetros Modbus PZEM-004T 0xF8 Dirección por defecto
+#define MODBUS_SLAVE_ADDR           0x01    // Parámetros Modbus PZEM-004T 0xF8 Dirección por defecto
 #define MODBUS_RESPONSE_TIMEOUT_MS  200
-#define MODBUS_READ                 0x04       // Función Modbus para leer registros de entrada
-#define MODBUS_DIR_READ             0x0000 // Dirección inicial para leer registros de entrada
+#define MODBUS_READ                 0x04    // Función Modbus para leer registros de entrada
+#define MODBUS_DIR_READ             0x0000  // Dirección inicial para leer registros de entrada
 
 // Definiciones de pines
 #define ENCODER_PIN_A   GPIO_NUM_6
@@ -53,6 +54,8 @@ SH1106 *oled_display = nullptr; // Instancia global del display
 
 // Variable global para el tiempo de espera antes del disparo (0 a 10.000 us)
 volatile uint64_t tiempo_espera_us = 0; // "volatile" es para que el compilador sepa que esto cambia en tiempo real
+
+SemaphoreHandle_t oled_mutex = NULL;    // Mutex para proteger el acceso al OLED
 
 esp_timer_handle_t timer_handle;        // Handle del timer para el retardo
 
@@ -111,6 +114,8 @@ extern "C" void app_main()
     int enconder_auto_last;   // Ultimo valor del Encoder en modo automático
     int enconder_manual_last; // Ultimo valor del encoder en modo manual
 
+    oled_mutex = xSemaphoreCreateMutex(); // Crear mutex para proteger acceso al OLED
+
     // Inicializaciones
     init_i2c();             // Inicializar I2C
     init_gpio();            // Inicializar GPIO
@@ -118,17 +123,8 @@ extern "C" void app_main()
     timer_init();           // Inicializar el Timer de alta resolución
 
     init_modbus_uart();    // Inicializar UART para Modbus
-    pzem_data_t pzem_data; // Estructura para datos PZEM-004T
 
-    // Crear tarea para leer datos del PZEM-004T periódicamente
-    xTaskCreate(
-        leer_pzem_004,   // La funcion que lee el PZEM-004T
-        "Leer_PZEM_004", // Nombre de la tarea
-        4096,            // Tamaño de la pila
-        &pzem_data,      // Parámetro que se le pasa a la tarea
-        5,               // Prioridad de la tarea
-        NULL             // Handle de la tarea (no se usa)
-    );
+    pzem_data_t pzem_data; // Estructura para datos PZEM-004T  
 
     // Crear instancia del display pasando el handle del dispositivo I2C
     oled_display = new SH1106(sh1106_dev_handle);
@@ -155,7 +151,7 @@ extern "C" void app_main()
     rotary_encoder = new Encoder(ENCODER_PIN_A, ENCODER_PIN_B, -1000, 1000, 10, 5, 150);
     rotary_encoder->init();
 
-    manual_enconder = new Encoder(ENCODER_PIN_A, ENCODER_PIN_B, 0, 1500, 10, 1, 150);
+    manual_enconder = new Encoder(ENCODER_PIN_A, ENCODER_PIN_B, 0, 1500, 100, 10, 150);
     manual_enconder->init();
 
     pantalla();                                           // Mostrar pantalla inicial
@@ -166,6 +162,18 @@ extern "C" void app_main()
     enconder_manual_last = manual_enconder->get_count(); // Valor inicial del encoder en modo manual
 
     update_encoder_display_auto(&pzem_data);             // Mostrar valor inicial del encoder en pantalla
+
+    // Crear tarea para leer datos del PZEM-004T periódicamente
+    // La he tenido que bajar ya que se bloqueaba el sistema estaba antes de inicializar el oled ya
+    // que cuando se crea la tarea empezaba a leer el PZEM-004T, el sistema se bloqueaba al intentar actualizar la pantalla con datos no inicializados
+    xTaskCreate(
+        leer_pzem_004,   // La funcion que lee el PZEM-004T
+        "Leer_PZEM_004", // Nombre de la tarea
+        4096,            // Tamaño de la pila
+        &pzem_data,      // Parámetro que se le pasa a la tarea
+        5,               // Prioridad de la tarea
+        NULL             // Handle de la tarea (no se usa)
+    );
 
     while (1)
     {
@@ -241,7 +249,7 @@ void leer_pzem_004(void *arg)
             oled_display->drawString(90, 0, "      ");                      // Limpiar área anterior
             oled_display->drawString(90, 0, buffer);                        // Potencia Placa Solar
             
-            snprintf(buffer, sizeof(buffer), "%.1f V", pzem_data.voltage); // Formatear el float dentro del buffer
+            snprintf(buffer, sizeof(buffer), "%.0f V", pzem_data.voltage); // Formatear el float dentro del buffer
             oled_display->drawString(90, 1, "      ");                     // Limpiar área anterior
             oled_display->drawString(90, 1, buffer);                       // Voltaje Placa Solar
 
@@ -253,7 +261,12 @@ void leer_pzem_004(void *arg)
             oled_display->drawString(70, 5, "     ");
             oled_display->drawString(70, 5, buffer);                    // Potencia del enconder que le añadira al termo
  
-            oled_display->update();
+            if (xSemaphoreTake(oled_mutex, pdMS_TO_TICKS(50)) == pdTRUE)// Intentar tomar la llave
+            {
+                // Solo actualizo la pantalla si puedo tomar el mutex
+                oled_display->update();
+                xSemaphoreGive(oled_mutex); // Devolver la llave
+            }
 
             // Calculo la potencia que voy a enviar al Termo
             // Lo meto aqui ya que la potencia de la placa cambia constantemente
@@ -679,14 +692,20 @@ void update_encoder_display_auto(pzem_data_t *datos)
         oled_display->drawString(90, 0, "      ");                  // Limpiar área anterior
         oled_display->drawString(90, 0, buffer);                    // Potencia Placa Solar
 
-        snprintf(buffer, sizeof(buffer), "%.1f V", datos->voltage); 
+        snprintf(buffer, sizeof(buffer), "%.0f V", datos->voltage); 
         oled_display->drawString(90, 1, "      ");                  // Limpiar área anterior
         oled_display->drawString(90, 1, buffer);                    // Pasamos 'buffer' que ahora contiene el texto formateado
 
         snprintf(buffer, sizeof(buffer), "%d", rotary_encoder->get_count());
         oled_display->drawString(70, 5, "     ");                   // Limpiar área anterior
         oled_display->drawString(70, 5, buffer);
-        oled_display->update();
+
+        if (xSemaphoreTake(oled_mutex, pdMS_TO_TICKS(50)) == pdTRUE)// Intentar tomar la llave
+        {
+            // Solo actualizo la pantalla si puedo tomar el mutex
+            oled_display->update();
+            xSemaphoreGive(oled_mutex); // Devolver la llave
+        }
     }
 }
 
@@ -700,7 +719,12 @@ void update_encoder_display_manual()
         itoa(manual_enconder->get_count(), buffer, 10);
         oled_display->drawString(70, 3, "     "); // Limpiar área anterior
         oled_display->drawString(70, 3, buffer);
-        oled_display->update();
+
+        if (xSemaphoreTake(oled_mutex, pdMS_TO_TICKS(50)) == pdTRUE)// Intentar tomar la llave
+        { 
+            oled_display->update();     // Solo actualizo la pantalla si puedo tomar el mutex
+            xSemaphoreGive(oled_mutex); // Devolver la llave
+        }
     }
 }
 
