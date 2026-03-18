@@ -50,8 +50,8 @@ SH1106 *oled_display = nullptr; // Instancia global del display
 
 // El ancho del pulso de disparo en microsegundos son 500us y 5V en el modulo SRC
 #define ANCHO_PULSO_US  30     // pulso de ≥20–100 µs para que la probabilidad de disparo sea alta para 5mA
-#define MINIMA_POTENCIA 75.0f // minima potencia en watios para disparar el SRC correctamente es 29W estaba 129W
-#define MINIMA_POTENCIA_PLACA 90.0f // Si la potencia de la placa es menor que este valor, no disparo el SRC 
+#define MINIMA_POTENCIA 0.0f // minima potencia en watios para disparar el SRC correctamente es 29W estaba 75W
+#define MINIMA_POTENCIA_PLACA 100.0f // Si la potencia de la placa es menor que este valor, no disparo el SRC 
 
 // Variable global para el tiempo de espera antes del disparo (0 a 10.000 us)
 volatile uint64_t tiempo_espera_us = 0; // "volatile" es para que el compilador sepa que esto cambia en tiempo real
@@ -86,13 +86,13 @@ void isr_paso_cero(void *arg);                       // Manejador de interrupcio
 void pantalla();                                     // Funcion imprime en pantalla
 void estado_botones();                               // Funcion lee estado botones
 void update_encoder_display_auto(pzem_data_t *datos);// FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO AUTOMATICO
-void update_encoder_display_manual();                // FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO MANUAL
+void update_encoder_display_manual();                
 void timer_init();                                   // Inicializa el timer de alta resolución
 void timer_callback(void *arg);                      // Callback del timer de retardo
 void leer_pzem_004(void *arg);                       // Tarea para leer datos del PZEM-004T
 static void init_modbus_uart(void);                  // Inicializar UART para Modbus
 static esp_err_t read_pzem_data(pzem_data_t *data);  // Leer datos del PZEM-004T
-static uint64_t mapear_potencia_a_retardo(float potencia);  // Mapear potencia a retardo en microsegundos
+static uint64_t mapear_potencia_a_retardo(float potencia);  
 
 // Leer respuesta Modbus
 static esp_err_t read_modbus_response(uint8_t *buffer, uint16_t *length, uint16_t max_length);
@@ -107,7 +107,7 @@ static bool verify_crc(const uint8_t *data, uint16_t length);
 
 /******************************************************************************************************/
 /*                                                                                                    */
-/*                        FUNCIÓN PRINCIPAL                                                                             */
+/*                        FUNCIÓN PRINCIPAL                                                           */
 /*                                                                                                    */
 /******************************************************************************************************/
 extern "C" void app_main()
@@ -115,7 +115,7 @@ extern "C" void app_main()
     int enconder_auto_last;   // Ultimo valor del Encoder en modo automático
     int enconder_manual_last; // Ultimo valor del encoder en modo manual
 
-    oled_mutex = xSemaphoreCreateMutex(); // Crear led_mutex para proteger acceso al OLED
+    oled_mutex = xSemaphoreCreateMutex(); // Creo oled_mutex para proteger acceso al OLED
 
     // Inicializaciones
     init_i2c();             // Inicializar I2C
@@ -133,7 +133,6 @@ extern "C" void app_main()
     if (oled_display->probe())
     {
         ESP_LOGI(TAG, "SH1106 128x160 detectado");
-        // oled_display->init1(); // lo utilizo para borrar caracteres que me salen a la derecha
 
         if (oled_display->init())
         {
@@ -204,7 +203,14 @@ extern "C" void app_main()
                 enconder_manual_last = manual_enconder->get_count();
                 
                 // Pasa de watios a microsegundos 
-                tiempo_espera_us = mapear_potencia_a_retardo((float)enconder_manual_last);
+                if (manual_enconder->get_count() > 0)
+                {
+                    tiempo_espera_us = mapear_potencia_a_retardo((float)enconder_manual_last);
+                }
+                else
+                {
+                    tiempo_espera_us = 10000; // Si el valor del encoder manual es 0 no disparo el SRC
+                }
             }
         }
         vTaskDelay(1); // Pequeña demora para evitar uso excesivo de CPU
@@ -226,10 +232,8 @@ void leer_pzem_004(void *arg)
     esp_err_t ret;
 
     while (1)
-    {
-        float resultado = 0; // Variable para la conversion
-        
-        ret = read_pzem_data(&pzem_data);
+    {   
+        ret = read_pzem_data(&pzem_data); // Leer datos del PZEM-004T
 
         if (ret != ESP_OK)
         {
@@ -249,42 +253,54 @@ void leer_pzem_004(void *arg)
 
         if (mode) // Modo AUTOMATICO
         {
-            
-            if (xSemaphoreTake(oled_mutex, pdMS_TO_TICKS(50)) == pdTRUE)// Intenta tomar la llave
+            // Intenta tomar la llave del mutex para actualizar la pantalla, si no la toma en 50ms, 
+            // para evitar errores del I2C
+            if (xSemaphoreTake(oled_mutex, pdMS_TO_TICKS(50)) == pdTRUE)
             {
                 // Solo actualizo la pantalla si toma el mutex
                 snprintf(buffer, sizeof(buffer), "%.0f W", pzem_data.power);
-                oled_display->drawString(90, 0, "      ");                  // Limpiar área anterior
-                oled_display->drawString(90, 0, buffer);                    // Potencia Placa Solar
-                
-                snprintf(buffer, sizeof(buffer), "%.0f V", pzem_data.voltage); // Formatear el float dentro del buffer
-                oled_display->drawString(90, 1, "      ");                  // Limpiar área anterior
-                oled_display->drawString(90, 1, buffer);                    // Voltaje Placa Solar
+                oled_display->drawString(90, 0, "      ");   // Limpiar área anterior
+                // Potencia Placa Solar
+                oled_display->drawString(90, 0, buffer);                    
+                // Formatear el float dentro del buffer
+                snprintf(buffer, sizeof(buffer), "%.0f V", pzem_data.voltage); 
+                oled_display->drawString(90, 1, "      ");   // Limpiar área anterior
+                // Voltaje Placa Solar
+                oled_display->drawString(90, 1, buffer);                    
     
                 // itoa utiliza menos memoria que snprintf() 0.0f pero no lo recomiendan
-                //itoa((rotary_encoder->get_count() + pzem_data.power), buffer, 10);
                 itoa((rotary_encoder->get_count() + pzem_data.power + MINIMA_POTENCIA), buffer, 10); 
-                oled_display->drawString(70, 3, "     ");
-                oled_display->drawString(70, 3, buffer);                    // Potencia total (placa + encoder)
+                if (pzem_data.power < MINIMA_POTENCIA_PLACA)
+                {
+                    // Si la potencia de la placa es menor que MINIMA_POTENCIA_PLACA, no disparo el SRC
+                    oled_display->drawString(70, 3, "  0 W"); 
+                }
+                else
+                {
+                    oled_display->drawString(70, 3, "     ");
+                    // Potencia total (placa + encoder + minima potencia)
+                    oled_display->drawString(70, 3, buffer);                   
+                }
     
                 snprintf(buffer, sizeof(buffer), "%d", rotary_encoder->get_count());
                 oled_display->drawString(70, 5, "     ");
-                oled_display->drawString(70, 5, buffer);                    // Potencia del enconder que le añadira al termo
+                // Potencia del enconder que le añadira al termo
+                oled_display->drawString(70, 5, buffer);                    
                 oled_display->update();     
                 xSemaphoreGive(oled_mutex); // Devolver la llave
             }
-
-            // Calculo la potencia que voy a enviar al Termo
+           
             // Lo meto aqui ya que la potencia de la placa cambia constantemente
-            // Potencia del enconder + MINIMA_POTENCIA + potencia medida en el PZEM y lo paso a microsegundos
-            //resultado = 10000.0f - (((float)rotary_encoder->get_count() + MINIMA_POTENCIA + pzem_data.power) * 6.666667f);
-            // Si el resultado es menor que 0 o la potencia de la placa es menor que la minima, no disparo el SRC
-            //if (resultado < 0 || pzem_data.power < MINIMA_POTENCIA_PLACA) resultado = 0;
-            //if (resultado > 9500) resultado = 9500; // Un poco menos de 10ms para seguridad
-            
-            //tiempo_espera_us = (uint64_t)resultado;
-
-            tiempo_espera_us = mapear_potencia_a_retardo((float)rotary_encoder->get_count() + MINIMA_POTENCIA + pzem_data.power);
+            if (pzem_data.power < MINIMA_POTENCIA_PLACA)
+            {
+                // Si la potencia de la placa es menor que MINIMA_POTENCIA_PLACA, no disparo el SRC
+                tiempo_espera_us = 10000; // No disparo el SRC
+            }
+            else
+            {
+                // La Potencia del enconder + MINIMA_POTENCIA + potencia medida en el PZEM y lo paso a microsegundos
+                tiempo_espera_us = mapear_potencia_a_retardo((float)rotary_encoder->get_count() + MINIMA_POTENCIA + pzem_data.power);
+            }
             // Debug: Imprimir potencia total y retardo
             //printf("Potencia total: %.1f W, Retardo: %llu us\n", (float)rotary_encoder->get_count() + MINIMA_POTENCIA + pzem_data.power, tiempo_espera_us); 
         }
@@ -301,10 +317,7 @@ void leer_pzem_004(void *arg)
 // Callback del Timer: Genera el pulso de disparo del SRC
 void timer_callback(void *arg)
 {
-    // Si el tiempo de espera es menor que la minima potencia o > 9999 no hacemos nada
-    // ya que si manda algo el disparo es erratico
-    //if ((tiempo_espera_us < (MINIMA_POTENCIA * 6.666667f)) || tiempo_espera_us > 9999)
-    if (tiempo_espera_us > (mapear_potencia_a_retardo( MINIMA_POTENCIA )) )
+    if (tiempo_espera_us > (mapear_potencia_a_retardo( MINIMA_POTENCIA_PLACA )) )
     {
         return;
     }  
@@ -723,7 +736,9 @@ void update_encoder_display_auto(pzem_data_t *datos)
     }
 }
 
-//  FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN PANTALLA EN MODO MANUAL
+/**
+ * @brief Actualiza el valor del enconder manual en la pantalla OLED.
+ */
 void update_encoder_display_manual()
 {
     if (oled_display && manual_enconder)
@@ -743,7 +758,12 @@ void update_encoder_display_manual()
     }
 }
 
-// Mapear potencia a retardo en microsegundos
+
+/**
+ * @brief Convierte potencia a tiempo de disparo buscando el primer registro que iguale o supere la potencia.
+ * @param potencia_buscada Valor de 0 a 1500
+ * @return uint64_t Tiempo en microsegundos (0 a 10000)
+ */
 static uint64_t mapear_potencia_a_retardo(float potencia)
 {
     typedef struct
@@ -753,20 +773,20 @@ static uint64_t mapear_potencia_a_retardo(float potencia)
     } mapa_t;
 
     // Usamos 'static const' para que la tabla resida en la memoria Flash y no sature la RAM
-    static const mapa_t tabla[42] = {
-        {75, 7980},   {100, 7760},  {125, 7575},  {150, 7410},  {175, 7260},
-        {200, 7120},  {225, 6990},  {250, 6865},  {275, 6748},  {300, 6637},
-        {325, 6530},  {350, 6425},  {375, 6325},  {400, 6225},  {425, 6130},
-        {450, 6035},  {475, 5945},  {500, 5853},  {525, 5765},  {550, 5678},
-        {575, 5590},  {600, 5505},  {625, 5420},  {650, 5335},  {675, 5250},
-        {700, 5167},  {750, 4999},  {800, 4833},  {850, 4665},  {900, 4495},
-        {950, 4323},  {1000, 4145}, {1050, 3965}, {1100, 3775}, {1150, 3575},
-        {1200, 3365}, {1250, 3135}, {1300, 2880}, {1350, 2590}, {1400, 2240},
-        {1450, 1755}, {1500, 350} 
+    static const mapa_t tabla[45] = {
+        {75, 7980},   {100, 7760},  {112, 7674},  {125, 7575},  {136, 7500},
+        {150, 7410},  {168, 7300},  {175, 7260},  {200, 7120},  {225, 6990},
+        {250, 6865},  {275, 6748},  {300, 6637},  {325, 6530},  {350, 6425},  
+        {375, 6325},  {400, 6225},  {425, 6130},  {450, 6035},  {475, 5945},
+        {500, 5853},  {525, 5765},  {550, 5678},  {575, 5590},  {600, 5505}, 
+        {625, 5420},  {650, 5335},  {675, 5250},  {700, 5167},  {750, 4999},  
+        {800, 4833},  {850, 4665},  {900, 4495},  {950, 4323},  {1000, 4145},
+        {1050, 3965}, {1100, 3775}, {1150, 3575}, {1200, 3365}, {1250, 3135}, 
+        {1300, 2880}, {1350, 2590}, {1400, 2240}, {1450, 1755}, {1500, 350} 
     };
 
     //Buscamos en la tabla el valor de potencia más cercano por encima
-    for (int i=0; i < 42; i++)
+    for (int i=0; i < 45; i++)
     {
         if (potencia <= tabla[i].potencia)
         {
