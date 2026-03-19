@@ -50,8 +50,8 @@ SH1106 *oled_display = nullptr; // Instancia global del display
 
 // El ancho del pulso de disparo en microsegundos son 500us y 5V en el modulo SRC
 #define ANCHO_PULSO_US  30     // pulso de ≥20–100 µs para que la probabilidad de disparo sea alta para 5mA
-#define MINIMA_POTENCIA 0.0f // minima potencia en watios para disparar el SRC correctamente es 29W estaba 75W
 #define MINIMA_POTENCIA_PLACA 100.0f // Si la potencia de la placa es menor que este valor, no disparo el SRC 
+#define POTENCIA_SEGURIDAD_SCR 8400.0f // 8400us son 38W en mis pruebas son 29W, dejo un marjen seguridad
 
 // Variable global para el tiempo de espera antes del disparo (0 a 10.000 us)
 volatile uint64_t tiempo_espera_us = 0; // "volatile" es para que el compilador sepa que esto cambia en tiempo real
@@ -253,8 +253,8 @@ void leer_pzem_004(void *arg)
 
         if (mode) // Modo AUTOMATICO
         {
-            // Intenta tomar la llave del mutex para actualizar la pantalla, si no la toma en 50ms, 
-            // para evitar errores del I2C
+            // Intenta tomar la llave del mutex para actualizar la pantalla, si no la toma en 50ms 
+            // no entra, para evitar errores del I2C
             if (xSemaphoreTake(oled_mutex, pdMS_TO_TICKS(50)) == pdTRUE)
             {
                 // Solo actualizo la pantalla si toma el mutex
@@ -269,7 +269,7 @@ void leer_pzem_004(void *arg)
                 oled_display->drawString(90, 1, buffer);                    
     
                 // itoa utiliza menos memoria que snprintf() 0.0f pero no lo recomiendan
-                itoa((rotary_encoder->get_count() + pzem_data.power + MINIMA_POTENCIA), buffer, 10); 
+                itoa((rotary_encoder->get_count() + pzem_data.power), buffer, 10); 
                 if (pzem_data.power < MINIMA_POTENCIA_PLACA)
                 {
                     // Si la potencia de la placa es menor que MINIMA_POTENCIA_PLACA, no disparo el SRC
@@ -298,11 +298,9 @@ void leer_pzem_004(void *arg)
             }
             else
             {
-                // La Potencia del enconder + MINIMA_POTENCIA + potencia medida en el PZEM y lo paso a microsegundos
-                tiempo_espera_us = mapear_potencia_a_retardo((float)rotary_encoder->get_count() + MINIMA_POTENCIA + pzem_data.power);
+                // La Potencia del enconder + potencia medida en el PZEM y lo paso a microsegundos
+                tiempo_espera_us = mapear_potencia_a_retardo((float)rotary_encoder->get_count() + pzem_data.power);
             }
-            // Debug: Imprimir potencia total y retardo
-            //printf("Potencia total: %.1f W, Retardo: %llu us\n", (float)rotary_encoder->get_count() + MINIMA_POTENCIA + pzem_data.power, tiempo_espera_us); 
         }
         else
         {
@@ -317,17 +315,30 @@ void leer_pzem_004(void *arg)
 // Callback del Timer: Genera el pulso de disparo del SRC
 void timer_callback(void *arg)
 {
-    if (tiempo_espera_us > (mapear_potencia_a_retardo( MINIMA_POTENCIA_PLACA )) )
+    // Si el tiempo de espera es 10000us, significa que no quiero disparar el SRC
+    if (tiempo_espera_us == 10000) 
     {
-        return;
-    }  
+        return; // No disparo el SRC
+    }
 
-    gpio_set_level(SCR, 1); // 1. Subir el pin (Inicio del pulso)
+    // Seguridad: Si el tiempo de espera es mayor que 8400us, no disparo el SRC, 
+    // ya que el módulo SRC no dispara correctamente por encima de ese retardo
+    // 8400us son 38W en mis pruebas son 29W, dejo un marjen seguridad
+    if (tiempo_espera_us > POTENCIA_SEGURIDAD_SCR) 
+    {
+        // Limitar el tiempo de espera al máximo permitido para el SRC
+        tiempo_espera_us = POTENCIA_SEGURIDAD_SCR; 
+    }  
+     
+    // 1. Subir el pin (Inicio del pulso)
+    gpio_set_level(SCR, 1); 
 
     // Bloqueamos la CPU ANCHO_PULSO_US microsegundos para garantizar el disparo
-    ets_delay_us(ANCHO_PULSO_US); // Esperar exactamente ANCHO_PULSO_US microsegundos
+    // Esperar exactamente ANCHO_PULSO_US microsegundos
+    ets_delay_us(ANCHO_PULSO_US); 
 
-    gpio_set_level(SCR, 0); // Bajar el pin (Fin del pulso)
+    // Bajar el pin (Fin del pulso)
+    gpio_set_level(SCR, 0); 
 }
 
 // Esta es la función que se ejecutará (ISR Handler) para paso por cero
@@ -773,10 +784,11 @@ static uint64_t mapear_potencia_a_retardo(float potencia)
     } mapa_t;
 
     // Usamos 'static const' para que la tabla resida en la memoria Flash y no sature la RAM
-    static const mapa_t tabla[45] = {
-        {75, 7980},   {100, 7760},  {112, 7674},  {125, 7575},  {136, 7500},
-        {150, 7410},  {168, 7300},  {175, 7260},  {200, 7120},  {225, 6990},
-        {250, 6865},  {275, 6748},  {300, 6637},  {325, 6530},  {350, 6425},  
+    static const mapa_t tabla[51] = {
+        {38, 8400},   {75, 7980},   {100, 7760},  {112, 7674},  {125, 7575},  {136, 7500},
+        {150, 7410},  {168, 7300},  {175, 7260},  {187, 7190},  {200, 7120},  
+        {215, 7040},  {225, 6990},  {240, 6915},  {250, 6865},  {263, 6805},
+        {275, 6748},  {288, 6690},  {300, 6637},  {325, 6530},  {350, 6425},  
         {375, 6325},  {400, 6225},  {425, 6130},  {450, 6035},  {475, 5945},
         {500, 5853},  {525, 5765},  {550, 5678},  {575, 5590},  {600, 5505}, 
         {625, 5420},  {650, 5335},  {675, 5250},  {700, 5167},  {750, 4999},  
@@ -786,7 +798,7 @@ static uint64_t mapear_potencia_a_retardo(float potencia)
     };
 
     //Buscamos en la tabla el valor de potencia más cercano por encima
-    for (int i=0; i < 45; i++)
+    for (int i=0; i < 51; i++)
     {
         if (potencia <= tabla[i].potencia)
         {
