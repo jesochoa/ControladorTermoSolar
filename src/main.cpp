@@ -50,7 +50,7 @@ SH1106 *oled_display = nullptr; // Instancia global del display
 
 // El ancho del pulso de disparo en microsegundos son 500us y 5V en el modulo SRC
 #define ANCHO_PULSO_US  30     // pulso de ≥20–100 µs para que la probabilidad de disparo sea alta para 5mA
-#define MINIMA_POTENCIA_PLACA 100.0f // Si la potencia de la placa es menor que este valor, no disparo el SRC 
+#define MINIMA_POTENCIA_PLACA 90.0f // Si la potencia de la placa es menor que este valor, no dispara el SRC 
 #define POTENCIA_SEGURIDAD_SCR 8400.0f // 8400us son 38W en mis pruebas son 29W, dejo un marjen seguridad
 
 // Variable global para el tiempo de espera antes del disparo (0 a 10.000 us)
@@ -79,15 +79,15 @@ typedef struct
     uint16_t alarms;
 } pzem_data_t;
 
-bool init_i2c();                                     // Configura I2C
-bool init_gpio();                                    // Configura GPIO
-bool init_interrupts(void *arg);                     // Configura interrupciones GPIO
-void isr_paso_cero(void *arg);                       // Manejador de interrupciones paso por cero, quito IRAM_ATTR
-void pantalla();                                     // Funcion imprime en pantalla
-void estado_botones();                               // Funcion lee estado botones
-void update_encoder_display_auto(pzem_data_t *datos);// FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN MODO AUTOMATICO
+bool init_i2c();                                   
+bool init_gpio();                                    
+bool init_interrupts(void *arg);                     
+void isr_paso_cero(void *arg);                       
+void pantalla();                               
+void estado_botones();                               
+void update_encoder_display_auto(pzem_data_t *datos);
 void update_encoder_display_manual();                
-void timer_init();                                   // Inicializa el timer de alta resolución
+void timer_init();                                   
 void timer_callback(void *arg);                      // Callback del timer de retardo
 void leer_pzem_004(void *arg);                       // Tarea para leer datos del PZEM-004T
 static void init_modbus_uart(void);                  // Inicializar UART para Modbus
@@ -277,7 +277,7 @@ void leer_pzem_004(void *arg)
                 }
                 else
                 {
-                    oled_display->drawString(70, 3, "     ");
+                    oled_display->drawString(70, 3, "      ");
                     // Potencia total (placa + encoder + minima potencia)
                     oled_display->drawString(70, 3, buffer);                   
                 }
@@ -341,7 +341,10 @@ void timer_callback(void *arg)
     gpio_set_level(SCR, 0); 
 }
 
-// Esta es la función que se ejecutará (ISR Handler) para paso por cero
+/**
+ * @brief Esta es la función que se ejecutará (ISR Handler) para paso por cero
+ * @param arg Argumentos para la función
+ */
 void IRAM_ATTR isr_paso_cero(void *arg)
 {
     // Paso de seguridad: Si ya había un timer corriendo (porque si llegaron pulsos muy rápido),
@@ -358,8 +361,8 @@ static esp_err_t read_pzem_data(pzem_data_t *data)
     uint8_t response_buffer[bytes_to_read];
     uint16_t response_length = 0;
 
-    // Leer 10 registros empezando desde 0x0000 (Función 04 - Read Input Registers)
-    ESP_ERROR_CHECK(send_modbus_command(MODBUS_SLAVE_ADDR, MODBUS_READ, MODBUS_DIR_READ, 10)); // Leer 10 registro (20 bytes)
+    // Leer 10 registros (20 bytes)empezando desde 0x0000 (Función 04 - Read Input Registers)
+    ESP_ERROR_CHECK(send_modbus_command(MODBUS_SLAVE_ADDR, MODBUS_READ, MODBUS_DIR_READ, 10)); 
 
     // Leer respuesta
     esp_err_t ret = read_modbus_response(response_buffer, &response_length, sizeof(response_buffer));
@@ -385,15 +388,18 @@ static esp_err_t read_pzem_data(pzem_data_t *data)
         return ESP_ERR_INVALID_SIZE;
     }
 
-    // Procesar datos (big-endian)
-    data->voltage = (float)((response_buffer[3] << 8) | response_buffer[4]) / 10.0f;
-    data->current = (float)((response_buffer[5] << 8) | response_buffer[6]) / 1000.0f;
-    data->power = (float)((response_buffer[9] << 8) | response_buffer[10] | (response_buffer[7] << 8) | response_buffer[8]) / 10.0f;
-    data->energy = (float)((response_buffer[13] << 8) | response_buffer[14] |
-                           (response_buffer[11] << 24) | (response_buffer[12] << 16)) /
-                   1000.0f;
-    data->frequency = (float)((response_buffer[17] << 8) | response_buffer[18]) / 10.0f;
-    data->power_factor = (float)((response_buffer[19] << 8) | response_buffer[20]) / 100.0f;
+    // Procesar datos
+    data->voltage = ((response_buffer[3] << 8) | response_buffer[4]) / 10.0f;
+    data->current = ((response_buffer[5] << 8) | response_buffer[6]) / 1000.0f;
+
+    data->power = ((response_buffer[7] << 24) | (response_buffer[8] << 16) | (response_buffer[9] << 8) |
+         response_buffer[10]) / 10.0f;
+
+    data->energy = ((response_buffer[11] << 24) | (response_buffer[12] << 16) | (response_buffer[13] << 8) |
+        response_buffer[14]) / 1000.0f;
+    
+    data->frequency = ((response_buffer[17] << 8) | response_buffer[18]) / 10.0f;
+    data->power_factor = ((response_buffer[19] << 8) | response_buffer[20]) / 100.0f;
     data->alarms = (response_buffer[21] << 8) | response_buffer[22];
 
     return ESP_OK;
@@ -521,27 +527,72 @@ static bool verify_crc(const uint8_t *data, uint16_t length)
     return (received_crc == calculated_crc);
 }
 
-// Función para actualizar la pantalla
+/* @brief Función para actualizar la pantalla con los textos sin información.
+* Actualiza pantalla cuanto toma el muttex
+*/
 void pantalla()
 {
     if (oled_display)
     {
-        oled_display->clear();
-        //   AJUSTADO: Solo 8 líneas disponibles (0-7)
-        oled_display->drawString(2, 0, "  Placa Solar:");
-        oled_display->drawString(2, 1, "Voltaje Placa:");
-        oled_display->drawString(2, 2, " ");
-        oled_display->drawString(2, 3, "Termo (W):");
-        oled_display->drawString(2, 4, "  ");
-        oled_display->drawString(2, 5, "Casa  (W):        ");
-        oled_display->drawString(2, 6, " ");
-        oled_display->drawString(2, 7, "Modo: AUTOMATICO");
-        oled_display->update();
+        if(xSemaphoreTake(oled_mutex, pdMS_TO_TICKS(50)) == pdTRUE)
+        {
+            oled_display->clear();
+            //   AJUSTADO: Solo 8 líneas disponibles (0-7)
+            oled_display->drawString(2, 0, "  Placa Solar:");
+            oled_display->drawString(2, 1, "Voltaje Placa:");
+            oled_display->drawString(2, 2, " ");
+            oled_display->drawString(2, 3, "Termo (W):");
+            oled_display->drawString(2, 4, "  ");
+            oled_display->drawString(2, 5, "Casa  (W):        ");
+            oled_display->drawString(2, 6, " ");
+            oled_display->drawString(2, 7, "Modo: AUTOMATICO");
+            oled_display->update();
+            xSemaphoreGive(oled_mutex); // Devolver la llave si la tomó.
+        }
     }
 }
 
+/**
+ * @brief Función para leer el estado de los botones y visualizarlos en la pantalla OLED.
+ * Actualiza la pantalla cuando tome el mutex.
+ */
 void estado_botones()
 {
+    // Pulsado botón BOTON_PUSH (CAMBIA MODO)
+    if (gpio_get_level(BOTON_PUSH) == 0)
+    {
+    mode = !mode; // Cambiar estado del modo
+
+        if (mode)
+        {
+            if(xSemaphoreTake(oled_mutex, pdMS_TO_TICKS(50)) == pdTRUE)
+            {
+                oled_display->drawString(70, 3, "      "); // Borra potencia manual
+                oled_display->drawString(2, 5, "Casa  (W):");
+                oled_display->drawString(2, 7, "Modo: AUTOMATICO");
+                oled_display->update();
+                xSemaphoreGive(oled_mutex); // Devolver la llave.
+            }
+        }
+        else
+        {
+            if (xSemaphoreTake(oled_mutex, pdMS_TO_TICKS(50)) == pdTRUE)
+            {
+                oled_display->drawString(70, 5, "     "); // Borra potencia automática
+                oled_display->drawString(2, 7, "Modo: MANUAL     ");
+                oled_display->update();
+                xSemaphoreGive(oled_mutex); // Devolver la llave si la tomó.
+            }
+            // Pasa de watios a microsegundos para el modo manual.
+            tiempo_espera_us = mapear_potencia_a_retardo((float)manual_enconder->get_count()); 
+            update_encoder_display_manual();
+        }
+
+        // Pequeña demora para evitar rebotes
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
+
     // pulsado botón CONFIRM 
     if (gpio_get_level(BOTON_CONFIRM) == 0)
     {
@@ -549,18 +600,26 @@ void estado_botones()
 
         if (mode)
         {
-            oled_display->drawString(70, 3, "     "); // Borra potencia manual
-            oled_display->drawString(2, 5, "Casa  (W):");
-            oled_display->drawString(2, 7, "Modo: AUTOMATICO");
-            oled_display->update();
+            if(xSemaphoreTake(oled_mutex, pdMS_TO_TICKS(50)) == pdTRUE)
+            {
+                oled_display->drawString(70, 3, "      "); // Borra potencia manual
+                oled_display->drawString(2, 5, "Casa  (W):");
+                oled_display->drawString(2, 7, "Modo: AUTOMATICO");
+                oled_display->update();
+                xSemaphoreGive(oled_mutex); // Devolver la llave.
+            }
         }
         else
         {
-            oled_display->drawString(70, 5, "     "); // Borra potencia automática
-            oled_display->drawString(2, 7, "Modo: MANUAL     ");
-            oled_display->update();
-            // Pasa de watios a microsegundos 
-            tiempo_espera_us = mapear_potencia_a_retardo((float)manual_enconder->get_count()); //Soluciona cuando paso de automatico a manual no cambia la potencia
+            if (xSemaphoreTake(oled_mutex, pdMS_TO_TICKS(50)) == pdTRUE)
+            {
+                oled_display->drawString(70, 5, "     "); // Borra potencia automática
+                oled_display->drawString(2, 7, "Modo: MANUAL     ");
+                oled_display->update();
+                xSemaphoreGive(oled_mutex); // Devolver la llave si la tomó.
+            }
+            // Pasa de watios a microsegundos para el modo manual.
+            tiempo_espera_us = mapear_potencia_a_retardo((float)manual_enconder->get_count()); 
             update_encoder_display_manual();
         }
 
@@ -582,7 +641,10 @@ void estado_botones()
     }
 }
 
-// FUNCIÓN PARA INICIALIZAR I2C
+/**
+ * @brief Inicializar I2C.
+ * @return true si se inicializa correctamente, false en caso contrario.
+ */
 bool init_i2c()
 {
     esp_err_t ret;
@@ -628,7 +690,10 @@ bool init_i2c()
     return true;
 }
 
-//  FUNCIÓN PARA INICIALIZAR GPIO
+/**
+ * @brief Inicializar GPIO.
+ * @return true si se inicializan correctamente, false en caso contrario.
+ */
 bool init_gpio()
 {
     ESP_LOGI(TAG, "Inicializando GPIO ...");
@@ -664,7 +729,9 @@ bool init_gpio()
     return true;
 }
 
-// Inicializa el timer de alta resolución
+/**
+ * @brief Inicializa el timer de alta resolución.
+ */
 void timer_init()
 {
     esp_err_t ret;
@@ -687,7 +754,11 @@ void timer_init()
     }
 }
 
-// Funcion para incializar el GPIO con interrupcion
+/**
+ * @brief Inicializar interrupciones GPIO.
+ * @param mode Puntero al modo de operación, automatico true y manual false.
+ * @return true si se inicializan correctamente, false en caso contrario.
+ */
 bool init_interrupts(void *mode)
 {
     ESP_LOGI(TAG, "Inicializando interrupciones GPIO ...");
@@ -718,7 +789,12 @@ bool init_interrupts(void *mode)
     return true;
 }
 
-//  FUNCIÓN PARA MOSTRAR VALOR DEL ENCODER EN PANTALLA EN MODO AUTOMATICO
+/**
+ * @brief Actualizar pantalla del encoder automático.
+ *  Esta función se llama cada vez que se detecta un cambio en el encoder automático y actualiza la pantalla con el nuevo valor.
+ *  Solo actualiza el área del valor del encoder automático cuando toma el mutex para evitar errores del I2C. 
+ * @param datos Puntero a la estructura con los datos del PZEM-004T para mostrar en pantalla junto al valor del encoder automático.
+ */
 void update_encoder_display_auto(pzem_data_t *datos)
 {
     if (oled_display && rotary_encoder)
@@ -748,20 +824,21 @@ void update_encoder_display_auto(pzem_data_t *datos)
 }
 
 /**
- * @brief Actualiza el valor del enconder manual en la pantalla OLED.
+ * @brief Actualizar pantalla del encoder manual.
+ *  Esta función se llama cada vez que se detecta un cambio en el encoder manual y actualiza la pantalla con el nuevo valor.
+ * Solo actualiza el área del valor del encoder manual cuando toma el mutex para evitar errores del I2C. 
  */
 void update_encoder_display_manual()
 {
     if (oled_display && manual_enconder)
     {
-        char buffer[5];
+        char buffer[7];
         
         
         if (xSemaphoreTake(oled_mutex, pdMS_TO_TICKS(50)) == pdTRUE)// Intentar tomar la llave
-        { 
-            // Solo actualizo la pantalla si toma el mutex
-            itoa(manual_enconder->get_count(), buffer, 10); // itoa utiliza menos memoria que snprintf()
-            oled_display->drawString(70, 3, "     ");       // Limpiar área anterior
+        {     
+            snprintf(buffer, sizeof(buffer), "%d W", manual_enconder->get_count()); 
+            oled_display->drawString(70, 3, "      ");       // Limpiar área anterior
             oled_display->drawString(70, 3, buffer);
             oled_display->update();     
             xSemaphoreGive(oled_mutex); // Devolver la llave
@@ -772,7 +849,7 @@ void update_encoder_display_manual()
 
 /**
  * @brief Convierte potencia a tiempo de disparo buscando el primer registro que iguale o supere la potencia.
- * @param potencia_buscada Valor de 0 a 1500
+ * @param potencia Valor de 0 a 1500
  * @return uint64_t Tiempo en microsegundos (0 a 10000)
  */
 static uint64_t mapear_potencia_a_retardo(float potencia)
@@ -784,12 +861,14 @@ static uint64_t mapear_potencia_a_retardo(float potencia)
     } mapa_t;
 
     // Usamos 'static const' para que la tabla resida en la memoria Flash y no sature la RAM
-    static const mapa_t tabla[51] = {
-        {38, 8400},   {75, 7980},   {100, 7760},  {112, 7674},  {125, 7575},  {136, 7500},
-        {150, 7410},  {168, 7300},  {175, 7260},  {187, 7190},  {200, 7120},  
-        {215, 7040},  {225, 6990},  {240, 6915},  {250, 6865},  {263, 6805},
-        {275, 6748},  {288, 6690},  {300, 6637},  {325, 6530},  {350, 6425},  
-        {375, 6325},  {400, 6225},  {425, 6130},  {450, 6035},  {475, 5945},
+    static const mapa_t tabla[60] = {
+        {38, 8400},   {55, 8188},   {75, 7980},   {87, 7872},   {100, 7760},  
+        {112, 7674},  {125, 7575},  {136, 7500},  {150, 7410},  {168, 7300},  
+        {175, 7260},  {187, 7190},  {200, 7120},  {215, 7040},  {225, 6990},  
+        {240, 6915},  {250, 6865},  {263, 6805},  {275, 6748},  {288, 6690},  
+        {300, 6637},  {313, 6581},  {325, 6530},  {338, 6475},  {350, 6425},  
+        {362, 6375},  {375, 6325},  {387, 6275},  {400, 6225},  {412, 6178}, 
+        {425, 6130},  {437, 6083},  {450, 6035},  {462, 5990},  {475, 5945}, 
         {500, 5853},  {525, 5765},  {550, 5678},  {575, 5590},  {600, 5505}, 
         {625, 5420},  {650, 5335},  {675, 5250},  {700, 5167},  {750, 4999},  
         {800, 4833},  {850, 4665},  {900, 4495},  {950, 4323},  {1000, 4145},
@@ -798,7 +877,7 @@ static uint64_t mapear_potencia_a_retardo(float potencia)
     };
 
     //Buscamos en la tabla el valor de potencia más cercano por encima
-    for (int i=0; i < 51; i++)
+    for (int i=0; i < 60; i++)
     {
         if (potencia <= tabla[i].potencia)
         {
