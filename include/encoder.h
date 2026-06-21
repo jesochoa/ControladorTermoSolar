@@ -39,6 +39,7 @@ public:
     // Métodos principales
     void update();
     int get_count() const;
+    // Le doy un valor al encoder
     void set_count(int value);
     void reset();
     
