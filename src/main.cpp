@@ -431,15 +431,6 @@ void timer_callback(void *arg)
  */
 void IRAM_ATTR isr_paso_cero(void *arg)
 {
-    if (0) // Lo anulo haber si el reinicio es por esto
-    {
-        // Paso de seguridad: Si ya había un timer corriendo (porque si llegaron pulsos muy rápido),
-        // lo detenemos para reiniciar la cuenta. Esto hace el sistema "re-disparable".
-        esp_timer_stop(timer_handle);
-
-        esp_timer_start_once(timer_handle, tiempo_espera_us); // Iniciar el Timer una sola vez
-    }
-
     // Comprobamos si el timer está activo.
     // Si lo está, lo reiniciamos; si no, lo iniciamos desde cero.
     if (esp_timer_is_active(timer_handle))
@@ -448,6 +439,7 @@ void IRAM_ATTR isr_paso_cero(void *arg)
     }
     else
     {
+        // Iniciar el Timer una sola vez
         esp_timer_start_once(timer_handle, tiempo_espera_us);
     }
 }
