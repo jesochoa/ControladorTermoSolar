@@ -4,7 +4,7 @@
 #include "driver/gpio.h"
 #include "sh1106.h"
 #include "encoder.h"
-#include "esp_timer.h"
+#include "esp_timer.h" // No se puede utilizar en interrupciones da reseteos
 #include "driver/uart.h"     // Para comunicación Modbus RTU
 #include "freertos/task.h"   // Para leer PZEM-004T periódicamente
 #include "freertos/semphr.h" // Librería para usar semáforos
@@ -75,16 +75,15 @@ SH1106 *oled_display = nullptr; // Instancia global del display
 #define MINIMA_POTENCIA_PLACA 45.0f    // Si la potencia de la placa es menor que este valor, no dispara el SRC 45.0f
 #define POTENCIA_SEGURIDAD_SCR 8400.0f // 8400us son 38W en mis pruebas son 29W, dejo un marjen seguridad
 
-// Variable global para el tiempo de espera antes del disparo (0 a 10.000 us)
+// Variable global para el tiempo de espera antes del disparo (0 a 10.000 us) para dar la potencia deseada
 // "volatile" es para que el compilador sepa que esto cambia en tiempo real y no optimice el código asumiendo que no cambia
-// volatile uint64_t tiempo_espera_us = 0;
-volatile uint32_t tiempo_espera_us = 0;
+volatile uint32_t tiempo_espera_us = 10000; 
 
 // Creo Mutex para proteger el acceso al OLED
 SemaphoreHandle_t oled_mutex = NULL;
 
 // Handle del timer para el retardo
-esp_timer_handle_t timer_handle;
+esp_timer_handle_t timer_handle; //Antiguo esp_timer
 
 // Modo inicial: true = AUTOMATICO, false = MANUAL
 bool mode = true;
@@ -114,7 +113,6 @@ void estado_botones();
 void update_encoder_display_auto(pzem_data_t *datos);
 void update_encoder_display_manual();
 void timer_init();
-void timer_callback(void *arg);                     // Callback del timer de retardo
 void leer_pzem_004(void *arg);                      // Tarea para leer datos del PZEM-004T
 static void init_modbus_uart(void);                 // Inicializar UART para Modbus
 static esp_err_t read_pzem_data(pzem_data_t *data); // Leer datos del PZEM-004T
@@ -405,6 +403,8 @@ void timer_callback(void *arg)
         return; // No disparo el SRC
     }
 
+    if (0) //Lo anulo ya que creo que no hace falta.
+    {
     // Seguridad: Si el tiempo de espera es mayor que 8400us, no disparo el SRC,
     // ya que el módulo SRC no dispara correctamente por encima de ese retardo
     // 8400us son 38W en mis pruebas son 29W, dejo un margen de seguridad
@@ -413,6 +413,8 @@ void timer_callback(void *arg)
         // Limitar el tiempo de espera al máximo permitido para el SRC
         tiempo_espera_us = POTENCIA_SEGURIDAD_SCR;
     }
+    }
+
 
     // Subir el pin (Inicio del pulso)
     gpio_set_level(SCR, 1);
@@ -826,7 +828,8 @@ bool init_gpio()
 void timer_init()
 {
     esp_err_t ret;
-
+   
+    // Timer esp_timer
     // Crear el Timer de Alta Resolución
     const esp_timer_create_args_t timer_args = {
         .callback = &timer_callback,       // Función callback del timer
@@ -843,6 +846,7 @@ void timer_init()
     {
         ESP_LOGI(TAG, "Timer de alta resolucion inicializado correctamente");
     }
+
 }
 
 /**
