@@ -8,29 +8,7 @@
 #include "driver/uart.h"     // Para comunicación Modbus RTU
 #include "freertos/task.h"   // Para leer PZEM-004T periódicamente
 #include "freertos/semphr.h" // Librería para usar semáforos
-#include "esp_wifi.h"
-#include "esp_now.h"
-#include "nvs_flash.h"
-
-// Estructura del medidor exterior
-typedef struct
-{
-    uint32_t voltage;
-    uint32_t potencia_watts;
-    bool direction;
-} power_data_t;
-
-power_data_t received_power_data;
-
-// Callback de ESP-NOW que se ejecuta al recibir datos
-void on_data_recv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingData, int len)
-{
-    // Copiar los datos recibidos a nuestra estructura local
-    memcpy(&received_power_data, incomingData, sizeof(received_power_data));
-    // ESP_LOGI("Receptor", "Potencia recibida: %lu W", received_power_data.potencia_watts);
-    // ESP_LOGI("Receptor","Voltage recibido: %lu V",received_power_data.voltage);
-    // ESP_LOGI("Receptor", "Direccion: %s", received_power_data.direction ? "ENTRANTE" : "SALIENTE");
-}
+#include "esp_now_config.h"  // Para comunicación ESP-NOW con el medidor exterior
 
 #define TAG "OLED_APP"
 
@@ -157,26 +135,11 @@ extern "C" void app_main()
     // Crear instancia del display pasando el handle del dispositivo I2C
     oled_display = new SH1106(sh1106_dev_handle);
 
-    // Inicializar el WIFI en modo Estación (STA)
-    ESP_ERROR_CHECK(nvs_flash_init());
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    // Inicializar ESP-NOW
-    if (esp_now_init() != ESP_OK)
-    {
-        ESP_LOGE("MAIN", "Error al inicializar ESP-NOW");
+    // NUEVA INICIALIZACIÓN DE ESP-NOW (Fichero separado)
+    if (init_esp_now_custom() != ESP_OK) {
+        ESP_LOGE("MAIN", "Fallo crítico en el módulo ESP-NOW");
         return;
     }
-
-    // Funcion callback de ESP-NOW cuando recibe datos
-    ESP_ERROR_CHECK(esp_now_register_recv_cb(on_data_recv));
 
     if (oled_display->probe())
     {
@@ -199,8 +162,8 @@ extern "C" void app_main()
     rotary_encoder = new Encoder(ENCODER_PIN_A, ENCODER_PIN_B, -1000, 1000, 10, 5, 150);
     rotary_encoder->init();
 
-    // Inicializo el encoder automatico a -50W
-    rotary_encoder->set_count(-50);
+    // Inicializo el encoder automatico a -90W
+    rotary_encoder->set_count(-90);
 
     manual_enconder = new Encoder(ENCODER_PIN_A, ENCODER_PIN_B, 0, 1500, 100, 10, 150);
     manual_enconder->init();
