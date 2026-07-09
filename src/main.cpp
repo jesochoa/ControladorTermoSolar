@@ -144,19 +144,15 @@ extern "C" void app_main()
     if (oled_display->probe())
     {
         ESP_LOGI(TAG, "SH1106 128x160 detectado");
-
         if (oled_display->init())
         {
             ESP_LOGI(TAG, "SH1106 inicializado");
-            // Limpiar pantalla
-            oled_display->clear();
+            oled_display->clear();  // Limpiar pantalla
             oled_display->update();
         }
     }
     else
-    {
-        ESP_LOGE(TAG, "SH1106 no detectado");
-    }
+    { ESP_LOGE(TAG, "SH1106 no detectado"); }
 
     // Crear e inicializar el encoder automatico y manual
     rotary_encoder = new Encoder(ENCODER_PIN_A, ENCODER_PIN_B, -1000, 1000, 10, 5, 150);
@@ -170,7 +166,7 @@ extern "C" void app_main()
 
     pantalla(); // Mostrar pantalla inicial
 
-    read_pzem_data(&pzem_data); // Solo lee datos del PZEM-004T
+    read_pzem_data(&pzem_data); // Lee datos del PZEM-004T
 
     enconder_auto_last = rotary_encoder->get_count();    // Valor inicial del encoder en modo automático
     enconder_manual_last = manual_enconder->get_count(); // Valor inicial del encoder en modo manual
@@ -361,23 +357,7 @@ void leer_pzem_004(void *arg)
 void timer_callback(void *arg)
 {
     // Si el tiempo de espera es 10000us, significa que no quiero disparar el SRC
-    if (tiempo_espera_us == 10000)
-    {
-        return; // No disparo el SRC
-    }
-
-    if (0) //Lo anulo ya que creo que no hace falta.
-    {
-    // Seguridad: Si el tiempo de espera es mayor que 8400us, no disparo el SRC,
-    // ya que el módulo SRC no dispara correctamente por encima de ese retardo
-    // 8400us son 38W en mis pruebas son 29W, dejo un margen de seguridad
-    if (tiempo_espera_us > POTENCIA_SEGURIDAD_SCR)
-    {
-        // Limitar el tiempo de espera al máximo permitido para el SRC
-        tiempo_espera_us = POTENCIA_SEGURIDAD_SCR;
-    }
-    }
-
+    if (tiempo_espera_us == 10000) { return; }  // No disparo el SRC
 
     // Subir el pin (Inicio del pulso)
     gpio_set_level(SCR, 1);
