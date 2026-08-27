@@ -4,30 +4,17 @@
 #include "driver/gpio.h"
 #include "sh1106.h"
 #include "encoder.h"
-#include "esp_timer.h" // No se puede utilizar en interrupciones da reseteos
-#include "driver/uart.h"     // Para comunicación Modbus RTU
-#include "freertos/task.h"   // Para leer PZEM-004T periódicamente
+#include "esp_timer.h"       
+#include "freertos/task.h"   // Para crear tarea para leer PZEM-004T
 #include "freertos/semphr.h" // Librería para usar semáforos
 #include "esp_now_config.h"  // Para comunicación ESP-NOW con el medidor exterior
+#include "pzem_modbus.h"
+// Configuración Timer y retardo
+#include "rom/ets_sys.h" // Para ets_delay_us
 
 #define TAG "OLED_APP"
 
-// Configuración UART para Modbus RTU
-#define UART_MODBUS_NUM UART_NUM_1
-#define MODBUS_BAUDRATE 9600
-#define MODBUS_RX_PIN GPIO_NUM_4
-#define MODBUS_TX_PIN GPIO_NUM_3
-#define MODBUS_STOP_BITS UART_STOP_BITS_1
-#define MODBUS_RTS_PIN UART_PIN_NO_CHANGE
-#define MODBUS_CTS_PIN UART_PIN_NO_CHANGE
-#define MODBUS_RX_BUFFER_SIZE 256
-#define MODBUS_TX_BUFFER_SIZE 256
-#define MODBUS_SLAVE_ADDR 0x01 // Parámetros Modbus PZEM-004T 0xF8 Dirección por defecto
-#define MODBUS_RESPONSE_TIMEOUT_MS 200
-#define MODBUS_READ 0x04       // Función Modbus para leer registros de entrada
-#define MODBUS_DIR_READ 0x0000 // Dirección inicial para leer registros de entrada
-
-// Definiciones de pines
+// Definiciones de pines Enconder y SRC y botones
 #define ENCODER_PIN_A GPIO_NUM_6
 #define ENCODER_PIN_B GPIO_NUM_7
 #define PASO_CERO GPIO_NUM_1
@@ -36,6 +23,17 @@
 #define BOTON_CONFIRM GPIO_NUM_20
 #define BOTON_PUSH GPIO_NUM_8
 
+// Definiciones de pines UART para Modbus RTU
+#define MODBUS_UART_NUM UART_NUM_1
+#define MODBUS_BAUDRATE 9600
+#define MODBUS_RX_PIN GPIO_NUM_4
+#define MODBUS_TX_PIN GPIO_NUM_3
+
+// El ancho del pulso de disparo en microsegundos son 500us y 5V en el modulo SRC
+#define ANCHO_PULSO_US 30              // pulso de ≥20–100 µs para que la probabilidad de disparo sea alta para 5mA
+#define MINIMA_POTENCIA_PLACA 45.0f    // Si la potencia de la placa es menor que este valor, no dispara el SRC 45.0f
+#define POTENCIA_SEGURIDAD_SCR 8400.0f // 8400us son 38W en mis pruebas son 29W, dejo un marjen seguridad
+
 // Configuración I2C
 #define I2C_MASTER_SCL_IO GPIO_NUM_9
 #define I2C_MASTER_SDA_IO GPIO_NUM_10
@@ -43,15 +41,9 @@
 #define SH1106_I2C_ADDRESS 0x3C
 i2c_master_bus_handle_t bus_handle = nullptr;
 i2c_master_dev_handle_t sh1106_dev_handle = nullptr;
-SH1106 *oled_display = nullptr; // Instancia global del display
 
-// Configuración Timer y retardo
-#include "rom/ets_sys.h" // Para ets_delay_us
-
-// El ancho del pulso de disparo en microsegundos son 500us y 5V en el modulo SRC
-#define ANCHO_PULSO_US 30              // pulso de ≥20–100 µs para que la probabilidad de disparo sea alta para 5mA
-#define MINIMA_POTENCIA_PLACA 45.0f    // Si la potencia de la placa es menor que este valor, no dispara el SRC 45.0f
-#define POTENCIA_SEGURIDAD_SCR 8400.0f // 8400us son 38W en mis pruebas son 29W, dejo un marjen seguridad
+// Instancia global del display
+SH1106 *oled_display = nullptr; 
 
 // Variable global para el tiempo de espera antes del disparo (0 a 10.000 us) para dar la potencia deseada
 // "volatile" es para que el compilador sepa que esto cambia en tiempo real y no optimice el código asumiendo que no cambia
@@ -61,7 +53,7 @@ volatile uint32_t tiempo_espera_us = 10000;
 SemaphoreHandle_t oled_mutex = NULL;
 
 // Handle del timer para el retardo
-esp_timer_handle_t timer_handle; //Antiguo esp_timer
+esp_timer_handle_t timer_handle; 
 
 // Modo inicial: true = AUTOMATICO, false = MANUAL
 bool mode = true;
@@ -70,18 +62,7 @@ bool mode = true;
 Encoder *rotary_encoder = nullptr;
 Encoder *manual_enconder = nullptr;
 
-// Estructura para datos PZEM-004T
-typedef struct
-{
-    float voltage;
-    float current;
-    float power;
-    float energy;
-    float frequency;
-    float power_factor;
-    uint16_t alarms;
-} pzem_data_t;
-
+// Funciones utilizadas en el main
 bool init_i2c();
 bool init_gpio();
 bool init_interrupts(void *arg);
@@ -91,23 +72,14 @@ void estado_botones();
 void update_encoder_display_auto(pzem_data_t *datos);
 void update_encoder_display_manual();
 void timer_init();
-void leer_pzem_004(void *arg);                      // Tarea para leer datos del PZEM-004T
-static void init_modbus_uart(void);                 // Inicializar UART para Modbus
-static esp_err_t read_pzem_data(pzem_data_t *data); // Leer datos del PZEM-004T
 static uint32_t mapear_potencia_a_retardo(float potencia);
+// Tarea para leer datos del PZEM-004T
+void leer_pzem_004(void *arg);
 
-// Leer respuesta Modbus
-static esp_err_t read_modbus_response(uint8_t *buffer, uint16_t *length, uint16_t max_length);
+// Nota: El constructor usa por defecto UART_NUM_1, TX=GPIO_NUM_3, RX=GPIO_NUM_4, Dirección=0x01
+// Instancia del objeto PzemModbus para manejar la comunicación Modbus RTU con el PZEM-004T
+PzemModbus pzem(MODBUS_UART_NUM, MODBUS_TX_PIN, MODBUS_RX_PIN, 0x01);
 
-// Enviar comando Modbus RTU
-static esp_err_t send_modbus_command(uint8_t slave_addr, uint8_t function_code,
-                                     uint16_t start_addr, uint16_t reg_count);
-
-// Función para calcular CRC16 Modbus
-static uint16_t calculate_crc16(const uint8_t *data, uint16_t length);
-
-// Verificar CRC de respuesta
-static bool verify_crc(const uint8_t *data, uint16_t length);
 
 /******************************************************************************************************/
 /*                                                                                                    */
@@ -116,31 +88,37 @@ static bool verify_crc(const uint8_t *data, uint16_t length);
 /******************************************************************************************************/
 extern "C" void app_main()
 {
-    int enconder_auto_last;   // Ultimo valor del Encoder en modo automático
-    int enconder_manual_last; // Ultimo valor del encoder en modo manual
+    int enconder_auto_last;   // Último valor del Encoder en modo automático
+    int enconder_manual_last; // Último valor del encoder en modo manual
 
-    // Creo oled_mutex para el acceso al OLED
+    // Crear oled_mutex para el acceso seguro al OLED desde diferentes tareas
     oled_mutex = xSemaphoreCreateMutex();
 
-    // Inicializaciones
-    init_i2c();             // Inicializar I2C
-    init_gpio();            // Inicializar GPIO
-    init_interrupts(&mode); // Inicializar interrupciones GPIO_1 paso por cero
-    timer_init();           // Inicializar el Timer de alta resolución
+    // Inicializaciones de periféricos base
+    init_i2c();             // Inicializar I2C para el display SH1106
+    init_gpio();            // Inicializar GPIO (Botones y salida SCR)
+    init_interrupts(&mode); // Inicializar interrupciones del pin PASO_CERO (GPIO_1)
+    timer_init();           // Inicializar el Timer de alta resolución para el disparo del SCR
 
-    init_modbus_uart(); // Inicializar UART para Modbus
+    // Inicializar el nuevo módulo Modbus para el PZEM-004T
+    if (pzem.init() != ESP_OK)
+    {
+        ESP_LOGE("MAIN", "Fallo crítico al inicializar UART Modbus del PZEM-004T");
+        // Puedes decidir si retornar o continuar dependiendo de si es crítico para tu sistema
+    }
 
-    pzem_data_t pzem_data; // Estructura para datos PZEM-004T
+    pzem_data_t pzem_data; // Estructura local para almacenar las lecturas del PZEM-004T
 
     // Crear instancia del display pasando el handle del dispositivo I2C
     oled_display = new SH1106(sh1106_dev_handle);
 
-    // NUEVA INICIALIZACIÓN DE ESP-NOW (Fichero separado)
+    // Inicialización del módulo ESP-NOW
     if (init_esp_now_custom() != ESP_OK) {
         ESP_LOGE("MAIN", "Fallo crítico en el módulo ESP-NOW");
         return;
     }
 
+    // Verificar y arrancar la pantalla OLED
     if (oled_display->probe())
     {
         ESP_LOGI(TAG, "SH1106 128x160 detectado");
@@ -152,50 +130,50 @@ extern "C" void app_main()
         }
     }
     else
-    { ESP_LOGE(TAG, "SH1106 no detectado"); }
+    { 
+        ESP_LOGE(TAG, "SH1106 no detectado"); 
+    }
 
-    // Crear e inicializar el encoder automatico y manual
+    // Crear e inicializar el encoder automático y manual
     rotary_encoder = new Encoder(ENCODER_PIN_A, ENCODER_PIN_B, -1000, 1000, 10, 5, 150);
     rotary_encoder->init();
-
-    // Inicializo el encoder automatico a -90W
-    rotary_encoder->set_count(-90);
+    rotary_encoder->set_count(-90); // Inicializo el encoder automático a -90W
 
     manual_enconder = new Encoder(ENCODER_PIN_A, ENCODER_PIN_B, 0, 1500, 100, 10, 150);
     manual_enconder->init();
 
-    pantalla(); // Mostrar pantalla inicial
+    pantalla(); // Mostrar plantilla de texto estático en la pantalla inicial
 
-    read_pzem_data(&pzem_data); // Lee datos del PZEM-004T
+    // Primera lectura síncrona del PZEM antes de lanzar las tareas periódicas
+    pzem.read_data(&pzem_data);
 
-    enconder_auto_last = rotary_encoder->get_count();    // Valor inicial del encoder en modo automático
-    enconder_manual_last = manual_enconder->get_count(); // Valor inicial del encoder en modo manual
+    enconder_auto_last = rotary_encoder->get_count();    // Valor inicial del encoder automático
+    enconder_manual_last = manual_enconder->get_count(); // Valor inicial del encoder manual
 
-    update_encoder_display_auto(&pzem_data); // Mostrar valor inicial del encoder en pantalla
+    update_encoder_display_auto(&pzem_data); // Mostrar valor inicial en la pantalla
 
-    // Crear tarea para leer datos del PZEM-004T periódicamente
-    // La he tenido que bajar ya que se bloqueaba el sistema estaba antes de inicializar el oled ya
-    // que cuando se crea la tarea empezaba a leer el PZEM-004T,
-    // el sistema se bloqueaba al intentar actualizar la pantalla con datos no inicializados
+    // Crear tarea en FreeRTOS para leer datos del PZEM-004T en paralelo
+    // Se ubica aquí para asegurar que el OLED y las estructuras de datos estén listos
     xTaskCreate(
-        leer_pzem_004,   // La funcion que lee el PZEM-004T
+        leer_pzem_004,   // La función que ejecutará el bucle de lectura periódica
         "Leer_PZEM_004", // Nombre de la tarea
-        4096,            // Tamaño de la pila
-        &pzem_data,      // Parámetro que se le pasa a la tarea
+        4096,            // Tamaño de la pila (Stack size)
+        &pzem_data,      // Parámetro (Puntero a la estructura de datos compartida)
         5,               // Prioridad de la tarea
-        NULL             // Handle de la tarea (no se usa)
+        NULL             // Handle de la tarea (No se usa)
     );
 
+    // Bucle principal de la aplicación (Hebra de control de interfaz de usuario)
     while (1)
     {
-        estado_botones(); // Leer botones BACK, PUSH y CONFIRM
+        estado_botones(); // Monitorear y procesar botones BACK, PUSH y CONFIRM
 
         if (mode)
         {
-            // Modo AUTOMATICO
-            rotary_encoder->update(); // Lee el encoder
+            // --- MODO AUTOMÁTICO ---
+            rotary_encoder->update(); // Actualizar lectura física del encoder
 
-            // Actualizar display del encoder si hay cambios
+            // Detectar cambios en el encoder automático para refrescar pantalla
             if (rotary_encoder->get_count() != enconder_auto_last)
             {
                 update_encoder_display_auto(&pzem_data);
@@ -204,35 +182,37 @@ extern "C" void app_main()
         }
         else
         {
-            // Modo MANUAL
-            manual_enconder->update(); // Lee el encoder
+            // --- MODO MANUAL ---
+            manual_enconder->update(); // Actualizar lectura física del encoder
 
-            // Actualizar display del encoder si hay cambios
+            // Detectar cambios en el encoder manual para refrescar pantalla y tiempos de disparo
             if (manual_enconder->get_count() != enconder_manual_last)
             {
                 update_encoder_display_manual();
                 enconder_manual_last = manual_enconder->get_count();
 
-                // Pasa de watios a microsegundos
+                // Convertir la potencia configurada de Watts a microsegundos de retardo
                 if (manual_enconder->get_count() > 0)
                 {
                     tiempo_espera_us = mapear_potencia_a_retardo((float)enconder_manual_last);
                 }
                 else
                 {
-                    tiempo_espera_us = 10000; // Si el valor del encoder manual es 0 no disparo el SRC
+                    tiempo_espera_us = 10000; // Si el valor manual es 0, no disparamos el SCR (retardo máximo)
                 }
             }
         }
-        vTaskDelay(1); // Pequeña demora para evitar uso excesivo de CPU
+        
+        vTaskDelay(pdMS_TO_TICKS(20)); // Pequeña demora para ceder tiempo de CPU a otras tareas
     }
 }
+
 
 /*********************************************************************************************************
                          FUNCIONES AUXILIARES
 **********************************************************************************************************/
 
-// Tarea que lee datos del PZEM-004T en paralelo
+// Tarea en paralelo que lee datos del PZEM-004T 
 void leer_pzem_004(void *arg)
 {
     // Tengo que castear el puntero void* al tipo correcto para acceder a los datos del PZEM-004T
@@ -245,8 +225,8 @@ void leer_pzem_004(void *arg)
 
     while (1)
     {
-        // Leer datos del PZEM-004T
-        ret = read_pzem_data(&pzem_data);
+        // LLAMADA AL NUEVO MÓDULO OBJETO
+        ret = pzem.read_data(&pzem_data);
 
         float potencia_total = 0.0f; // Potencia que va al termo
 
@@ -307,7 +287,7 @@ void leer_pzem_004(void *arg)
                 // Formatear el float dentro del buffer
                 // snprintf(buffer, sizeof(buffer), "%.0f V", pzem_data.voltage);
 
-                snprintf(buffer, sizeof(buffer), "%.0ld V", tiempo_espera_us); // Para debug del tiempo de espera
+                snprintf(buffer, sizeof(buffer), "%.0ldV", tiempo_espera_us); // Para debug del tiempo de espera
 
                 oled_display->drawString(90, 1, "      "); // Limpiar área anterior
                 // Voltaje Placa Solar
@@ -387,181 +367,6 @@ void IRAM_ATTR isr_paso_cero(void *arg)
         // Iniciar el Timer una sola vez
         esp_timer_start_once(timer_handle, tiempo_espera_us);
     }
-}
-
-// Leer datos del PZEM-004T
-static esp_err_t read_pzem_data(pzem_data_t *data)
-{
-    uint8_t bytes_to_read = 25; // Leer 25 bytes de datos
-    uint8_t response_buffer[bytes_to_read];
-    uint16_t response_length = 0;
-
-    // Leer 10 registros (20 bytes)empezando desde 0x0000 (Función 04 - Read Input Registers)
-    ESP_ERROR_CHECK(send_modbus_command(MODBUS_SLAVE_ADDR, MODBUS_READ, MODBUS_DIR_READ, 10));
-
-    // Leer respuesta
-    esp_err_t ret = read_modbus_response(response_buffer, &response_length, sizeof(response_buffer));
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE(TAG, "Timeout leyendo respuesta Modbus");
-        return ret;
-    }
-
-    // Verificar CRC
-    if (!verify_crc(response_buffer, response_length))
-    {
-        ESP_LOGE(TAG, "CRC error en respuesta Modbus");
-        return ESP_ERR_INVALID_CRC;
-    }
-
-    // Verificar longitud de respuesta
-    // response_buffer[2] contiene el byte count de datos
-    if (response_length < response_buffer[2] + 5)
-    { // 1(addr) + 1(func) + 1(byte count) + (data) + 2(CRC)
-        ESP_LOGE(TAG, "Respuesta muy corta: %d bytes", response_length);
-        ESP_LOGE(TAG, "response_buffer[2]: %d bytes", response_buffer[2]);
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    // Procesar datos
-    data->voltage = ((response_buffer[3] << 8) | response_buffer[4]) / 10.0f;
-    data->current = ((response_buffer[5] << 8) | response_buffer[6]) / 1000.0f;
-
-    data->power = ((response_buffer[7] << 24) | (response_buffer[8] << 16) | (response_buffer[9] << 8) |
-                   response_buffer[10]) /
-                  10.0f;
-
-    data->energy = ((response_buffer[11] << 24) | (response_buffer[12] << 16) | (response_buffer[13] << 8) |
-                    response_buffer[14]) /
-                   1000.0f;
-
-    data->frequency = ((response_buffer[17] << 8) | response_buffer[18]) / 10.0f;
-    data->power_factor = ((response_buffer[19] << 8) | response_buffer[20]) / 100.0f;
-    data->alarms = (response_buffer[21] << 8) | response_buffer[22];
-
-    return ESP_OK;
-}
-
-// Enviar comando Modbus RTU
-static esp_err_t send_modbus_command(uint8_t slave_addr, uint8_t function_code,
-                                     uint16_t start_addr, uint16_t reg_count)
-{
-    uint8_t frame[8];
-
-    // Construir trama Modbus
-    frame[0] = slave_addr;               // Dirección esclavo
-    frame[1] = function_code;            // Código de función leer escribir
-    frame[2] = (start_addr >> 8) & 0xFF; // Address high byte
-    frame[3] = start_addr & 0xFF;        // Address low byte
-    frame[4] = (reg_count >> 8) & 0xFF;  // Register count high byte
-    frame[5] = reg_count & 0xFF;         // Register count low byte
-
-    // Calcular CRC
-    uint16_t crc = calculate_crc16(frame, 6);
-    frame[6] = crc & 0xFF;        // CRC low byte
-    frame[7] = (crc >> 8) & 0xFF; // CRC high byte
-
-    // Enviar frame
-    int bytes_written = uart_write_bytes(UART_MODBUS_NUM, (const char *)frame, sizeof(frame));
-    if (bytes_written != sizeof(frame))
-    {
-        ESP_LOGE(TAG, "Error enviando comando Modbus");
-        return ESP_FAIL;
-    }
-    return ESP_OK;
-}
-
-// Función para calcular CRC16 Modbus
-static uint16_t calculate_crc16(const uint8_t *data, uint16_t length)
-{
-    uint16_t crc = 0xFFFF;
-
-    for (uint16_t i = 0; i < length; i++)
-    {
-        crc ^= data[i];
-        for (uint8_t j = 0; j < 8; j++)
-        {
-            if (crc & 0x0001)
-            {
-                crc = (crc >> 1) ^ 0xA001;
-            }
-            else
-            {
-                crc = crc >> 1;
-            }
-        }
-    }
-    return crc;
-}
-
-/**
- * @brief Inicializar UART para Modbus.
- *
- * @return
- *     - ESP_OK   Success
- *     - ESP_FAIL Parameter error
- */
-static void init_modbus_uart(void)
-{
-    uart_config_t uart_config = {
-        .baud_rate = MODBUS_BAUDRATE,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = MODBUS_STOP_BITS,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .rx_flow_ctrl_thresh = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
-        .flags = {
-            .allow_pd = 0, // No permitir que el dominio de energía se apague
-            .backup_before_sleep = 0,
-        },
-    };
-
-    ESP_ERROR_CHECK(uart_param_config(UART_MODBUS_NUM, &uart_config));
-    ESP_ERROR_CHECK(uart_set_pin(UART_MODBUS_NUM, MODBUS_TX_PIN, MODBUS_RX_PIN,
-                                 MODBUS_RTS_PIN, MODBUS_CTS_PIN));
-    ESP_ERROR_CHECK(uart_driver_install(UART_MODBUS_NUM, MODBUS_RX_BUFFER_SIZE,
-                                        MODBUS_TX_BUFFER_SIZE, 0, NULL, 0));
-}
-
-// Leer respuesta Modbus
-static esp_err_t read_modbus_response(uint8_t *buffer, uint16_t *length, uint16_t max_length)
-{
-    int64_t start_time = esp_timer_get_time();
-    uint16_t bytes_read = 0;
-
-    while ((esp_timer_get_time() - start_time) < (MODBUS_RESPONSE_TIMEOUT_MS * 1000))
-    {
-        int len = uart_read_bytes(UART_MODBUS_NUM, buffer + bytes_read,
-                                  max_length - bytes_read, 20 / portTICK_PERIOD_MS);
-
-        if (len > 0)
-        {
-            bytes_read += len;
-            // Pequeña pausa para permitir que lleguen más datos
-            vTaskDelay(10 / portTICK_PERIOD_MS);
-        }
-
-        if (bytes_read >= max_length)
-        {
-            break;
-        }
-    }
-
-    *length = bytes_read;
-    return (bytes_read > 0) ? ESP_OK : ESP_ERR_TIMEOUT;
-}
-
-// Verificar CRC de respuesta
-static bool verify_crc(const uint8_t *data, uint16_t length)
-{
-    if (length < 2)
-        return false;
-
-    uint16_t received_crc = (data[length - 1] << 8) | data[length - 2];
-    uint16_t calculated_crc = calculate_crc16(data, length - 2);
-
-    return (received_crc == calculated_crc);
 }
 
 /* @brief Función para actualizar la pantalla con los textos sin información.
